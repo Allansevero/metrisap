@@ -1,6 +1,7 @@
 -- migrations/0001_create_users_table.up.sql
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
+    supabase_user_id TEXT,
     name TEXT NOT NULL,
     token TEXT NOT NULL,
     webhook TEXT NOT NULL DEFAULT '',

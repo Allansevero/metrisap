@@ -45,13 +45,13 @@ func (s *server) routes() {
 
 	adminRoutes := s.router.PathPrefix("/admin").Subrouter()
 	adminRoutes.Use(s.authadmin)
-	adminRoutes.Handle("/users", s.ListUsers()).Methods("GET")
-	adminRoutes.Handle("/users", s.AddUser()).Methods("POST")
+	// As rotas para listar e adicionar usuários foram movidas para /instances e agora são protegidas por JWT
 	adminRoutes.Handle("/users/{id}", s.EditUser()).Methods("PUT")
-	adminRoutes.Handle("/users/{id}", s.DeleteUser()).Methods("DELETE")
+	// A rota para deletar usuários foi movida para /instances/{id} e agora é protegida por JWT
+
 
 	c := alice.New()
-	c = c.Append(s.authalice)
+	c = c.Append(s.jwtMiddleware) // NOVO: Usando o middleware JWT do Supabase
 	c = c.Append(hlog.NewHandler(routerLog))
 
 	c = c.Append(hlog.AccessHandler(func(r *http.Request, status, size int, duration time.Duration) {
@@ -61,7 +61,8 @@ func (s *server) routes() {
 			Int("status", status).
 			Int("size", size).
 			Dur("duration", duration).
-			Str("userid", r.Context().Value("userinfo").(Values).Get("Id")).
+			// O "userid" agora pode vir do supabase_user_id ou de outra informação que escolhermos
+			// Por enquanto, vamos deixar de logar o r.Context().Value("userinfo") para evitar pânico
 			Msg("Got API Request")
 	}))
 	c = c.Append(hlog.RemoteAddrHandler("ip"))
@@ -69,11 +70,17 @@ func (s *server) routes() {
 	c = c.Append(hlog.RefererHandler("referer"))
 	c = c.Append(hlog.RequestIDHandler("req_id", "Request-Id"))
 
-	s.router.Handle("/session/connect", c.Then(s.Connect())).Methods("POST")
-	s.router.Handle("/session/disconnect", c.Then(s.Disconnect())).Methods("POST")
-	s.router.Handle("/session/logout", c.Then(s.Logout())).Methods("POST")
-	s.router.Handle("/session/status", c.Then(s.GetStatus())).Methods("GET")
-	s.router.Handle("/session/qr", c.Then(s.GetQR())).Methods("GET")
+	// Novas rotas de instâncias protegidas por JWT
+	s.router.Handle("/instances", c.Then(s.ListUsers())).Methods("GET")
+	s.router.Handle("/instances", c.Then(s.AddInstance())).Methods("POST")
+	s.router.Handle("/instances/{id}", c.Then(s.DeleteInstance())).Methods("DELETE")
+
+
+	s.router.Handle("/instances/{id}/connect", c.Then(s.Connect())).Methods("POST")
+	s.router.Handle("/instances/{id}/disconnect", c.Then(s.Disconnect())).Methods("POST")
+	s.router.Handle("/instances/{id}/logout", c.Then(s.Logout())).Methods("POST")
+	s.router.Handle("/instances/{id}/status", c.Then(s.GetStatus())).Methods("GET")
+	s.router.Handle("/instances/{id}/qr", c.Then(s.GetQR())).Methods("GET")
 	s.router.Handle("/session/pairphone", c.Then(s.PairPhone())).Methods("POST")
 
 	s.router.Handle("/webhook", c.Then(s.SetWebhook())).Methods("POST")

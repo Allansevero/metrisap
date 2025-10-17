@@ -1,0 +1,31 @@
+# Dependencies
+frontend/node_modules
+node_modules
+
+# Build artifacts
+frontend/build
+build
+
+# Git
+.git
+.gitignore
+
+# Docker
+.dockerignore
+docker-compose.yml
+docker-compose-swarm.yaml
+Dockerfile
+
+# Data and volumes
+dbdata
+files
+*.db
+
+# Binaries and logs
+*.exe
+*.log
+
+# Documentation
+README.md
+API.md
+LICENSE

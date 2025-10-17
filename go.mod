@@ -26,6 +26,7 @@ require (
 require (
 	github.com/beeper/argo-go v1.1.2 // indirect
 	github.com/elliotchance/orderedmap/v3 v3.1.0 // indirect
+	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/petermattis/goid v0.0.0-20250904145737-900bdf8bb490 // indirect
 	github.com/vektah/gqlparser/v2 v2.5.30 // indirect
 	golang.org/x/exp v0.0.0-20250911091902-df9299821621 // indirect

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -223,49 +224,107 @@ func main() {
 }
 
 func runMigrations(db *sqlx.DB, exPath string) error {
-	log.Info().Msg("Checando se já existe algum usuário...")
+	log.Info().Msg("Iniciando processo de migração do banco de dados...")
 
-	var userCount int
-	if err := db.Get(&userCount, "SELECT COUNT(*) FROM users;"); err == nil {
-		if userCount > 0 {
-			log.Info().Msgf("Usuário(s) encontrado(s): %d. Pulando migrações...", userCount)
-			return nil
-		}
-		log.Warn().Msg("Nenhum usuário encontrado. Rodando migração e inserindo usuário padrão.")
-		return applyMigrationsAndCreateUser(db, exPath)
-	} else {
-		log.Warn().Err(err).Msg("Erro consultando usuários (talvez a tabela nem exista). Rodando migração...")
-		return applyMigrationsAndCreateUser(db, exPath)
-	}
-}
-
-func applyMigrationsAndCreateUser(db *sqlx.DB, exPath string) error {
-	log.Info().Msg("Executando migrações...")
-
-	migFile := filepath.Join(exPath, "migrations", "0001_create_users_table.up.sql")
-	sqlBytes, err := ioutil.ReadFile(migFile)
+	// 1. Create migrations table if it doesn't exist
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR(255) PRIMARY KEY)`)
 	if err != nil {
-		return fmt.Errorf("falha ao ler arquivo de migração (%s): %w", migFile, err)
+		return fmt.Errorf("falha ao criar tabela de migrações: %w", err)
 	}
-	if _, err = db.Exec(string(sqlBytes)); err != nil {
-		return fmt.Errorf("falha ao executar migração: %w", err)
-	}
-	log.Info().Msg("Migração executada com sucesso.")
+	log.Info().Msg("Tabela 'schema_migrations' verificada/criada.")
 
-	// Usar o token administrativo definido na variável de ambiente
-	userToken := *adminToken
-	if userToken == "" {
-		userToken = "1234ABCD" // Valor padrão caso não esteja definido
-		log.Warn().Msg("WUZAPI_ADMIN_TOKEN não definido, usando token padrão")
+	// 2. Get executed migrations
+	executed := make(map[string]bool)
+	var versions []string
+	err = db.Select(&versions, "SELECT version FROM schema_migrations")
+	if err != nil {
+		return fmt.Errorf("falha ao buscar migrações executadas: %w", err)
+	}
+	for _, v := range versions {
+		executed[v] = true
+	}
+	log.Info().Msgf("%d migrações já foram executadas.", len(executed))
+
+	// 3. Find and apply new migrations
+	migrationsDir := filepath.Join(exPath, "migrations")
+	files, err := ioutil.ReadDir(migrationsDir)
+	if err != nil {
+		return fmt.Errorf("falha ao ler diretório de migrações: %w", err)
 	}
 
-	if _, err = db.Exec("INSERT INTO users (name, token) VALUES ($1, $2)", "admin", userToken); err != nil {
-		if strings.Contains(err.Error(), "duplicate key") {
-			log.Warn().Msg("Usuário padrão já existe. Ignorando.")
-			return nil
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Name() < files[j].Name()
+	})
+
+	applied := 0
+	for _, file := range files {
+		fileName := file.Name()
+		if strings.HasSuffix(fileName, ".up.sql") {
+			if !executed[fileName] {
+				log.Info().Msgf("Aplicando migração: %s", fileName)
+				filePath := filepath.Join(migrationsDir, fileName)
+				sqlBytes, err := ioutil.ReadFile(filePath)
+				if err != nil {
+					return fmt.Errorf("falha ao ler arquivo de migração %s: %w", fileName, err)
+				}
+
+				tx, err := db.Begin()
+				if err != nil {
+					return fmt.Errorf("falha ao iniciar transação para migração %s: %w", fileName, err)
+				}
+
+				if _, err := tx.Exec(string(sqlBytes)); err != nil {
+					tx.Rollback()
+					return fmt.Errorf("falha ao executar migração %s: %w", fileName, err)
+				}
+
+				if _, err := tx.Exec("INSERT INTO schema_migrations (version) VALUES ($1)", fileName); err != nil {
+					tx.Rollback()
+					return fmt.Errorf("falha ao registrar migração %s: %w", fileName, err)
+				}
+
+				if err := tx.Commit(); err != nil {
+					return fmt.Errorf("falha ao commitar transação para migração %s: %w", fileName, err)
+				}
+
+				log.Info().Msgf("Migração %s aplicada com sucesso.", fileName)
+				applied++
+			}
 		}
-		return fmt.Errorf("erro ao inserir usuário padrão: %w", err)
 	}
-	log.Info().Msgf("Usuário padrão (admin/%s) inserido com sucesso.", userToken)
+
+	if applied > 0 {
+		log.Info().Msgf("Total de %d novas migrações aplicadas.", applied)
+	} else {
+		log.Info().Msg("Nenhuma nova migração para aplicar. O banco de dados está atualizado.")
+	}
+
+	// After migrations, check if we need to create the default admin user
+	var userCount int
+	err = db.Get(&userCount, "SELECT COUNT(*) FROM users")
+	if err != nil {
+		// This could happen if the first migration failed to create the users table
+		log.Warn().Err(err).Msg("Não foi possível verificar a contagem de usuários. A tabela 'users' pode não existir ainda. Pulando a criação do usuário padrão.")
+		return nil
+	}
+
+	if userCount == 0 {
+		log.Warn().Msg("Nenhum usuário encontrado. Inserindo usuário padrão 'admin'.")
+		userToken := *adminToken
+		if userToken == "" {
+			userToken = "1234ABCD" // Default value
+			log.Warn().Msg("WUZAPI_ADMIN_TOKEN não definido, usando token padrão")
+		}
+		if _, err := db.Exec("INSERT INTO users (name, token) VALUES ($1, $2)", "admin", userToken); err != nil {
+			if strings.Contains(err.Error(), "duplicate key") {
+				log.Warn().Msg("Usuário padrão já existe. Ignorando.")
+			} else {
+				return fmt.Errorf("erro ao inserir usuário padrão: %w", err)
+			}
+		} else {
+			log.Info().Msgf("Usuário padrão (admin/%s) inserido com sucesso.", userToken)
+		}
+	}
+
 	return nil
 }

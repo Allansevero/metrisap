@@ -13,11 +13,17 @@ services:
       - DB_HOST=db
       - DB_PORT=5432
       - TZ=America/Sao_Paulo
+      # URL do seu projeto Supabase. Encontre em: Project Settings > API > Project URL
+      - SUPABASE_URL=https://dzuzyaydjqsgacfdptxq.supabase.co
+      # Chave secreta JWT do seu projeto Supabase. Encontre em: Project Settings > API > JWT Secret
+      - SUPABASE_JWT_SECRET=3rpd3lYKkGOx1/sGyJ4ojsGr6FFgDsGx/0tIbc8RWTMiHY2w9iZ2ifsYFpnD/2OX5vRQYFVroxcmXTU+ud9SmA==
+
     volumes:
       - ./dbdata:/app/dbdata
       - ./files:/app/files
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     networks:
       - wuzapi-network
 
@@ -33,6 +39,11 @@ services:
       - db_data:/var/lib/postgresql/data
     networks:
       - wuzapi-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wuzapi -d wuzapi"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
       
 networks:
   wuzapi-network:

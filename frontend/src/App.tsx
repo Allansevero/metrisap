@@ -1,5 +1,5 @@
-import React, { useEffect } from 'react';
-import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
+import React from 'react';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { Box } from '@mui/material';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -10,6 +10,7 @@ import Login from './pages/Login';
 import ApiDocs from './pages/ApiDocs';
 import Footer from './components/Footer';
 
+// O componente Layout permanece o mesmo, provendo a estrutura visual da página.
 const Layout = ({ children }: { children: React.ReactNode }) => (
   <Box sx={{ 
     minHeight: '100vh',
@@ -39,31 +40,9 @@ const Layout = ({ children }: { children: React.ReactNode }) => (
   </Box>
 );
 
+// AppContent agora é mais simples. Ele apenas define a estrutura das rotas.
+// O controle de acesso é delegado para o componente `ProtectedRoute`.
 const AppContent: React.FC = () => {
-  const { validateToken } = useAuth();
-  const navigate = useNavigate();
-  const location = useLocation();
-
-  useEffect(() => {
-    const checkAuth = async () => {
-      const token = localStorage.getItem('token');
-      if (token) {
-        const isValid = await validateToken();
-        if (isValid) {
-          if (location.pathname === '/login') {
-            navigate('/');
-          }
-        } else {
-          navigate('/login');
-        }
-      } else {
-        navigate('/login');
-      }
-    };
-
-    checkAuth();
-  }, [validateToken, navigate, location.pathname]);
-
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
@@ -97,11 +76,13 @@ const AppContent: React.FC = () => {
           </ProtectedRoute>
         }
       />
+      {/* Redireciona qualquer rota não encontrada para a página inicial */}
       <Route path="*" element={<Navigate to="/" />} />
     </Routes>
   );
 };
 
+// O componente principal App envolve tudo com o AuthProvider.
 const App: React.FC = () => {
   return (
     <AuthProvider>
@@ -110,4 +91,5 @@ const App: React.FC = () => {
   );
 };
 
-export default App; 
+export default App;
+ 

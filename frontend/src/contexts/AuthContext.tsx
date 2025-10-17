@@ -1,102 +1,74 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import axios from 'axios';
+// src/contexts/AuthContext.tsx
+import React, { createContext, useContext, useEffect, useState } from 'react';
+import { Session, User } from '@supabase/supabase-js';
+import { supabase } from '../supabaseClient';
 
-// Configuração da URL base do axios
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5555';
-console.log('API URL:', API_URL);
-axios.defaults.baseURL = API_URL;
+// Define o tipo para o valor do nosso contexto de autenticação
+type AuthContextType = {
+  session: Session | null;
+  user: User | null;
+  loading: boolean;
+};
 
-interface AuthContextType {
-  isAuthenticated: boolean;
-  validateToken: () => Promise<boolean>;
-  login: (token: string) => Promise<void>;
-  logout: () => void;
-}
-
+// Cria o Context com um valor padrão.
+// O valor será fornecido pelo AuthProvider.
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// Cria o nosso Provedor de Autenticação.
+// Este componente irá envolver as partes da nossa aplicação que precisam saber sobre o estado de autenticação.
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-
-  const validateToken = async (): Promise<boolean> => {
-    try {
-      const token = localStorage.getItem('token');
-      if (!token) {
-        console.log('Token não encontrado no localStorage');
-        setIsAuthenticated(false);
-        return false;
-      }
-
-      console.log('Validando token...');
-      const response = await axios.get('/api/validate-token', {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-
-      console.log('Resposta da validação:', response.data);
-      if (response.data.valid) {
-        setIsAuthenticated(true);
-        return true;
-      } else {
-        setIsAuthenticated(false);
-        return false;
-      }
-    } catch (error) {
-      console.error('Erro ao validar token:', error);
-      if (axios.isAxiosError(error)) {
-        console.error('Detalhes do erro:', {
-          status: error.response?.status,
-          data: error.response?.data,
-          url: error.config?.url
-        });
-      }
-      setIsAuthenticated(false);
-      return false;
-    }
-  };
-
-  const login = async (token: string) => {
-    try {
-      console.log('Iniciando login...');
-      localStorage.setItem('token', token);
-      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-      const isValid = await validateToken();
-      if (!isValid) {
-        throw new Error('Token inválido');
-      }
-      console.log('Login realizado com sucesso');
-    } catch (error) {
-      console.error('Erro no login:', error);
-      localStorage.removeItem('token');
-      delete axios.defaults.headers.common['Authorization'];
-      throw error;
-    }
-  };
-
-  const logout = () => {
-    console.log('Realizando logout...');
-    localStorage.removeItem('token');
-    delete axios.defaults.headers.common['Authorization'];
-    setIsAuthenticated(false);
-  };
+  const [session, setSession] = useState<Session | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    console.log('Verificando autenticação inicial...');
-    validateToken();
+    // Tenta obter a sessão atual do Supabase quando o componente é montado.
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setUser(session?.user ?? null);
+      setLoading(false);
+    });
+
+    // Escuta por mudanças no estado de autenticação (LOGIN, LOGOUT, etc.).
+    // O Supabase gerencia a sessão e o token no localStorage automaticamente.
+    const { data: authListener } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        setSession(session);
+        setUser(session?.user ?? null);
+        setLoading(false);
+      }
+    );
+
+    // Função de limpeza: remove o listener quando o componente é desmontado.
+    return () => {
+      authListener?.subscription.unsubscribe();
+    };
   }, []);
 
+  // O valor que será compartilhado com os componentes filhos.
+  const value = {
+    session,
+    user,
+    loading,
+  };
+
+  // Renderiza os componentes filhos dentro do provedor de contexto.
+  // O `!loading` garante que não vamos renderizar as rotas da aplicação
+  // antes de sabermos se o usuário está logado ou não.
   return (
-    <AuthContext.Provider value={{ isAuthenticated, validateToken, login, logout }}>
-      {children}
+    <AuthContext.Provider value={value}>
+      {!loading && children}
     </AuthContext.Provider>
   );
 };
 
+// Hook customizado para facilitar o uso do nosso contexto de autenticação.
+// Em vez de importar useContext e AuthContext em cada componente,
+// podemos simplesmente chamar useAuth().
 export const useAuth = () => {
   const context = useContext(AuthContext);
   if (context === undefined) {
-    throw new Error('useAuth deve ser usado dentro de um AuthProvider');
+    throw new Error('useAuth must be used within an AuthProvider');
   }
   return context;
-}; 
+};

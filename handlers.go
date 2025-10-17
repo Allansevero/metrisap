@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"wuzapi/repository" // Adicionando a importação que faltava
 
 	"github.com/gorilla/mux"
 	"github.com/nfnt/resize"
@@ -172,87 +173,98 @@ func (s *server) auth(handler http.HandlerFunc) http.HandlerFunc {
 // Connects to Whatsapp Servers
 func (s *server) Connect() http.HandlerFunc {
 
-	type connectStruct struct {
-		Subscribe []string
-		Immediate bool
+	type connectRequest struct {
+		Subscribe []string `json:"subscribe"`
+		Immediate bool     `json:"immediate"`
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 1. Extrair IDs do contexto e da URL
+		supabaseUserID, ok := r.Context().Value("supabase_user_id").(string)
+		if !ok || supabaseUserID == "" {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("não foi possível identificar o usuário na requisição"))
+			return
+		}
 
-		webhook := r.Context().Value("userinfo").(Values).Get("Webhook")
-		jid := r.Context().Value("userinfo").(Values).Get("Jid")
-		txtid := r.Context().Value("userinfo").(Values).Get("Id")
-		token := r.Context().Value("userinfo").(Values).Get("Token")
-		userid, _ := strconv.Atoi(txtid)
-		eventstring := ""
-
-		// Decodes request BODY looking for events to subscribe
-		decoder := json.NewDecoder(r.Body)
-		var t connectStruct
-		err := decoder.Decode(&t)
+		vars := mux.Vars(r)
+		instanceID, err := strconv.Atoi(vars["id"])
 		if err != nil {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("ID da instância inválido"))
+			return
+		}
+
+		// 2. Buscar a instância e verificar a posse usando o repositório
+		repo := repository.NewPostgresRepository(s.db)
+		instance, err := repo.GetInstance(instanceID, supabaseUserID)
+		if err != nil {
+			s.Respond(w, r, http.StatusNotFound, err) // O erro do repo já é "não encontrada ou não pertence"
+			return
+		}
+
+		// 3. Decodificar o corpo da requisição
+		var req connectRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			s.Respond(w, r, http.StatusBadRequest, errors.New("Could not decode Payload"))
 			return
 		}
 
-		if clientPointer[userid] != nil {
+		// 4. Verificar se a instância já está conectada
+		if clientPointer[instance.ID] != nil {
 			s.Respond(w, r, http.StatusInternalServerError, errors.New("Already Connected"))
 			return
+		}
+
+		// 5. Lógica de subscrição de eventos (adaptada)
+		var subscribedEvents []string
+		if len(req.Subscribe) < 1 {
+			if !Find(subscribedEvents, "All") {
+				subscribedEvents = append(subscribedEvents, "All")
+			}
 		} else {
-
-			var subscribedEvents []string
-			if len(t.Subscribe) < 1 {
-				if !Find(subscribedEvents, "All") {
-					subscribedEvents = append(subscribedEvents, "All")
+			for _, arg := range req.Subscribe {
+				if !isValidEventType(arg) {
+					log.Warn().Str("Type", arg).Msg("Message type discarded")
+					continue
 				}
-			} else {
-				for _, arg := range t.Subscribe {
-					if !isValidEventType(arg) {
-						log.Warn().Str("Type", arg).Msg("Message type discarded")
-						continue
-					}
-					if !Find(subscribedEvents, arg) {
-						subscribedEvents = append(subscribedEvents, arg)
-					}
-				}
-			}
-			eventstring = strings.Join(subscribedEvents, ",")
-			_, err = s.db.Exec("UPDATE users SET events=$1 WHERE id=$2", eventstring, userid)
-			if err != nil {
-				log.Warn().Msg("Could not set events in users table")
-			}
-			log.Info().Str("events", eventstring).Msg("Setting subscribed events")
-			v := updateUserInfo(r.Context().Value("userinfo"), "Events", eventstring)
-			userinfocache.Set(token, v, cache.NoExpiration)
-
-			log.Info().Str("jid", jid).Msg("Attempt to connect")
-			killchannel[userid] = make(chan bool)
-			go s.startClient(userid, jid, token, subscribedEvents)
-
-			if t.Immediate == false {
-				log.Warn().Msg("Waiting 10 seconds")
-				time.Sleep(10000 * time.Millisecond)
-
-				if clientPointer[userid] != nil {
-					if !clientPointer[userid].IsConnected() {
-						s.Respond(w, r, http.StatusInternalServerError, errors.New("Failed to Connect"))
-						return
-					}
-				} else {
-					s.Respond(w, r, http.StatusInternalServerError, errors.New("Failed to Connect"))
-					return
+				if !Find(subscribedEvents, arg) {
+					subscribedEvents = append(subscribedEvents, arg)
 				}
 			}
 		}
+		eventstring := strings.Join(subscribedEvents, ",")
 
-		response := map[string]interface{}{"webhook": webhook, "jid": jid, "events": eventstring, "details": "Connected!"}
+		// TODO: Mover esta lógica para o repositório
+		_, err = s.db.Exec("UPDATE users SET events=$1 WHERE id=$2 AND supabase_user_id=$3", eventstring, instance.ID, supabaseUserID)
+		if err != nil {
+			log.Warn().Msg("Could not set events in users table")
+			// Não retornar erro aqui, apenas logar
+		}
+		log.Info().Str("events", eventstring).Msg("Setting subscribed events")
+
+		// O cache antigo `userinfocache` deve ser descontinuado ou repensado. Por agora, vamos ignorá-lo.
+
+		// 6. Iniciar o cliente whatsmeow
+		log.Info().Str("jid", instance.Jid).Msg("Attempt to connect")
+		killchannel[instance.ID] = make(chan bool)
+		go s.startClient(instance.ID, instance.Jid, instance.Token, subscribedEvents)
+
+		if !req.Immediate {
+			log.Warn().Msg("Waiting 10 seconds")
+			time.Sleep(10 * time.Second)
+
+			if clientPointer[instance.ID] == nil || !clientPointer[instance.ID].IsConnected() {
+				s.Respond(w, r, http.StatusInternalServerError, errors.New("Failed to Connect"))
+				return
+			}
+		}
+
+		// 7. Responder com sucesso
+		response := map[string]interface{}{"webhook": instance.Webhook, "jid": instance.Jid, "events": eventstring, "details": "Connected!"}
 		responseJson, err := json.Marshal(response)
 		if err != nil {
 			s.Respond(w, r, http.StatusInternalServerError, err)
-			return
 		} else {
 			s.Respond(w, r, http.StatusOK, string(responseJson))
-			return
 		}
 	}
 }
@@ -260,63 +272,68 @@ func (s *server) Connect() http.HandlerFunc {
 // Disconnects from Whatsapp websocket, does not log out device
 func (s *server) Disconnect() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-
-		txtid := r.Context().Value("userinfo").(Values).Get("Id")
-		jid := r.Context().Value("userinfo").(Values).Get("Jid")
-		token := r.Context().Value("userinfo").(Values).Get("Token")
-		userid, _ := strconv.Atoi(txtid)
-
-		if clientPointer[userid] == nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("No session"))
+		// 1. Extrair IDs e verificar posse
+		supabaseUserID, ok := r.Context().Value("supabase_user_id").(string)
+		if !ok || supabaseUserID == "" {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("não foi possível identificar o usuário na requisição"))
 			return
 		}
-		if clientPointer[userid].IsConnected() == true {
-			if clientPointer[userid].IsLoggedIn() == true {
-				log.Info().Str("jid", jid).Msg("Disconnection successfull")
 
-				// Send Disconnected webhook before killing the client
-				webhookurl := r.Context().Value("userinfo").(Values).Get("Webhook")
-				if webhookurl != "" {
-					postmap := make(map[string]interface{})
-					postmap["type"] = "Disconnected"
-					postmap["event"] = map[string]interface{}{}
+		vars := mux.Vars(r)
+		instanceID, err := strconv.Atoi(vars["id"])
+		if err != nil {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("ID da instância inválido"))
+			return
+		}
 
-					jsonData, err := json.Marshal(postmap)
-					if err == nil {
-						data := map[string]string{
-							"jsonData": string(jsonData),
-							"token":    token,
-						}
-						log.Info().Str("url", webhookurl).Str("eventType", "Disconnected").Msg("Sending Disconnected webhook")
-						go callHook(webhookurl, data, userid)
+		repo := repository.NewPostgresRepository(s.db)
+		instance, err := repo.GetInstance(instanceID, supabaseUserID)
+		if err != nil {
+			s.Respond(w, r, http.StatusNotFound, err)
+			return
+		}
+
+		// 2. Lógica de desconexão
+		if clientPointer[instance.ID] != nil && clientPointer[instance.ID].IsConnected() && clientPointer[instance.ID].IsLoggedIn() {
+			log.Info().Str("jid", instance.Jid).Msg("Disconnection successful")
+
+			// Envia o webhook de desconexão antes de matar o cliente
+			if instance.Webhook != "" {
+				postmap := make(map[string]interface{})
+				postmap["type"] = "Disconnected"
+				postmap["event"] = map[string]interface{}{}
+
+				jsonData, err := json.Marshal(postmap)
+				if err == nil {
+					data := map[string]string{
+						"jsonData": string(jsonData),
+						"token":    instance.Token,
 					}
+					log.Info().Str("url", instance.Webhook).Str("eventType", "Disconnected").Msg("Sending Disconnected webhook")
+					go callHook(instance.Webhook, data, instance.ID)
 				}
+			}
 
-				killchannel[userid] <- true
-				_, err := s.db.Exec("UPDATE users SET events=$1 WHERE id=$2", "", userid)
-				if err != nil {
-					log.Warn().Str("userid", txtid).Msg("Could not set events in users table")
-				}
-				v := updateUserInfo(r.Context().Value("userinfo"), "Events", "")
-				userinfocache.Set(token, v, cache.NoExpiration)
+			killchannel[instance.ID] <- true
 
-				response := map[string]interface{}{"Details": "Disconnected"}
-				responseJson, err := json.Marshal(response)
-				if err != nil {
-					s.Respond(w, r, http.StatusInternalServerError, err)
-				} else {
-					s.Respond(w, r, http.StatusOK, string(responseJson))
-				}
-				return
+			// 3. Limpar eventos usando o repositório
+			if err := repo.ClearInstanceEvents(instance.ID, supabaseUserID); err != nil {
+				log.Warn().Str("instance_id", vars["id"]).Msg("Could not clear events in users table")
+			}
+
+			// O cache antigo será removido/ignorado
+			userinfocache.Delete(instance.Token)
+
+			response := map[string]interface{}{"Details": "Disconnected"}
+			responseJson, err := json.Marshal(response)
+			if err != nil {
+				s.Respond(w, r, http.StatusInternalServerError, err)
 			} else {
-				log.Warn().Str("jid", jid).Msg("Ignoring disconnect as it was not connected")
-				s.Respond(w, r, http.StatusInternalServerError, errors.New("Cannot disconnect because it is not logged in"))
-				return
+				s.Respond(w, r, http.StatusOK, string(responseJson))
 			}
 		} else {
-			log.Warn().Str("jid", jid).Msg("Ignoring disconnect as it was not connected")
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("Cannot disconnect because it is not logged in"))
-			return
+			log.Warn().Str("jid", instance.Jid).Msg("Ignoring disconnect as it was not connected/logged in")
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("Cannot disconnect because it is not logged in or connected"))
 		}
 	}
 }
@@ -479,111 +496,114 @@ func (s *server) SetWebhook() http.HandlerFunc {
 	}
 }
 
-// Gets QR code encoded in Base64
+// GetQR busca o código QR para uma instância específica do usuário autenticado.
 func (s *server) GetQR() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-
-		txtid := r.Context().Value("userinfo").(Values).Get("Id")
-		userid, _ := strconv.Atoi(txtid)
-		code := ""
-
-		if clientPointer[userid] == nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("No session"))
+		// 1. Extrair IDs e verificar posse (indiretamente, via repositório)
+		supabaseUserID, ok := r.Context().Value("supabase_user_id").(string)
+		if !ok || supabaseUserID == "" {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("não foi possível identificar o usuário na requisição"))
 			return
-		} else {
-			if clientPointer[userid].IsConnected() == false {
-				s.Respond(w, r, http.StatusInternalServerError, errors.New("Not connected"))
-				return
-			}
-			rows, err := s.db.Query("SELECT qrcode AS code FROM users WHERE id=$1 LIMIT 1", userid)
-			if err != nil {
-				s.Respond(w, r, http.StatusInternalServerError, err)
-				return
-			}
-			defer rows.Close()
-			for rows.Next() {
-				err = rows.Scan(&code)
-				if err != nil {
-					s.Respond(w, r, http.StatusInternalServerError, err)
-					return
-				}
-			}
-			err = rows.Err()
-			if err != nil {
-				s.Respond(w, r, http.StatusInternalServerError, err)
-				return
-			}
-			if clientPointer[userid].IsLoggedIn() == true {
-				s.Respond(w, r, http.StatusInternalServerError, errors.New("Already Loggedin"))
-				return
-			}
 		}
 
-		log.Info().Str("userid", txtid).Str("qrcode", code).Msg("Get QR successful")
-		response := map[string]interface{}{"QRCode": fmt.Sprintf("%s", code)}
+		vars := mux.Vars(r)
+		instanceID, err := strconv.Atoi(vars["id"])
+		if err != nil {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("ID da instância inválido"))
+			return
+		}
+
+		// 2. Verificar estado da conexão em memória
+		if clientPointer[instanceID] == nil {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("No session"))
+			return
+		}
+		if !clientPointer[instanceID].IsConnected() {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("Not connected"))
+			return
+		}
+		if clientPointer[instanceID].IsLoggedIn() {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("Already Loggedin"))
+			return
+		}
+
+		// 3. Buscar o QR code no banco de dados de forma segura
+		repo := repository.NewPostgresRepository(s.db)
+		code, err := repo.GetInstanceQRCode(instanceID, supabaseUserID)
+		if err != nil {
+			s.Respond(w, r, http.StatusNotFound, err) // O erro do repo já é "não encontrada ou não pertence"
+			return
+		}
+
+		// 4. Retornar o QR code
+		log.Info().Int("instanceID", instanceID).Str("qrcode", code).Msg("Get QR successful")
+		response := map[string]interface{}{"QRCode": code}
 		responseJson, err := json.Marshal(response)
 		if err != nil {
 			s.Respond(w, r, http.StatusInternalServerError, err)
 		} else {
 			s.Respond(w, r, http.StatusOK, string(responseJson))
 		}
-		return
 	}
 }
 
 // Logs out device from Whatsapp (requires to scan QR next time)
 func (s *server) Logout() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-
-		txtid := r.Context().Value("userinfo").(Values).Get("Id")
-		jid := r.Context().Value("userinfo").(Values).Get("Jid")
-		userid, _ := strconv.Atoi(txtid)
-
-		if clientPointer[userid] == nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("No session"))
+		// 1. Extrair IDs e verificar posse
+		supabaseUserID, ok := r.Context().Value("supabase_user_id").(string)
+		if !ok || supabaseUserID == "" {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("não foi possível identificar o usuário na requisição"))
 			return
-		} else {
-			if clientPointer[userid].IsLoggedIn() == true && clientPointer[userid].IsConnected() == true {
-				err := clientPointer[userid].Logout(r.Context())
-				if err != nil {
-					log.Error().Str("jid", jid).Msg("Could not perform logout")
-					s.Respond(w, r, http.StatusInternalServerError, errors.New("Could not perform logout"))
-					return
-				} else {
-					log.Info().Str("jid", jid).Msg("Logged out")
+		}
 
-					// Send LoggedOut webhook before killing the client
-					token := r.Context().Value("userinfo").(Values).Get("Token")
-					webhookurl := r.Context().Value("userinfo").(Values).Get("Webhook")
-					if webhookurl != "" {
-						postmap := make(map[string]interface{})
-						postmap["type"] = "LoggedOut"
-						postmap["event"] = map[string]interface{}{}
+		vars := mux.Vars(r)
+		instanceID, err := strconv.Atoi(vars["id"])
+		if err != nil {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("ID da instância inválido"))
+			return
+		}
 
-						jsonData, err := json.Marshal(postmap)
-						if err == nil {
-							data := map[string]string{
-								"jsonData": string(jsonData),
-								"token":    token,
-							}
-							log.Info().Str("url", webhookurl).Str("eventType", "LoggedOut").Msg("Sending LoggedOut webhook")
-							go callHook(webhookurl, data, userid)
-						}
+		repo := repository.NewPostgresRepository(s.db)
+		instance, err := repo.GetInstance(instanceID, supabaseUserID)
+		if err != nil {
+			s.Respond(w, r, http.StatusNotFound, err)
+			return
+		}
+
+		// 2. Lógica de Logout
+		if clientPointer[instance.ID] != nil && clientPointer[instance.ID].IsConnected() && clientPointer[instance.ID].IsLoggedIn() {
+			err := clientPointer[instance.ID].Logout(r.Context())
+			if err != nil {
+				log.Error().Str("jid", instance.Jid).Msg("Could not perform logout")
+				s.Respond(w, r, http.StatusInternalServerError, errors.New("Could not perform logout"))
+				return
+			}
+
+			log.Info().Str("jid", instance.Jid).Msg("Logged out")
+
+			// Envia o webhook de logout
+			if instance.Webhook != "" {
+				postmap := make(map[string]interface{})
+				postmap["type"] = "LoggedOut"
+				postmap["event"] = map[string]interface{}{}
+
+				jsonData, err := json.Marshal(postmap)
+				if err == nil {
+					data := map[string]string{
+						"jsonData": string(jsonData),
+						"token":    instance.Token,
 					}
-
-					killchannel[userid] <- true
-				}
-			} else {
-				if clientPointer[userid].IsConnected() == true {
-					log.Warn().Str("jid", jid).Msg("Ignoring logout as it was not logged in")
-					s.Respond(w, r, http.StatusInternalServerError, errors.New("Could not disconnect as it was not logged in"))
-					return
-				} else {
-					log.Warn().Str("jid", jid).Msg("Ignoring logout as it was not connected")
-					s.Respond(w, r, http.StatusInternalServerError, errors.New("Could not disconnect as it was not connected"))
-					return
+					log.Info().Str("url", instance.Webhook).Str("eventType", "LoggedOut").Msg("Sending LoggedOut webhook")
+					go callHook(instance.Webhook, data, instance.ID)
 				}
 			}
+
+			killchannel[instance.ID] <- true
+		} else {
+			log.Warn().Str("jid", instance.Jid).Msg("Ignoring logout as it was not connected/logged in")
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("Could not perform logout as it was not connected/logged in"))
+			return
 		}
 
 		response := map[string]interface{}{"Details": "Logged out"}
@@ -593,7 +613,6 @@ func (s *server) Logout() http.HandlerFunc {
 		} else {
 			s.Respond(w, r, http.StatusOK, string(responseJson))
 		}
-		return
 	}
 }
 
@@ -654,19 +673,36 @@ func (s *server) PairPhone() http.HandlerFunc {
 
 // Gets Connected and LoggedIn Status
 func (s *server) GetStatus() http.HandlerFunc {
-
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 1. Extrair IDs e verificar posse
+		supabaseUserID, ok := r.Context().Value("supabase_user_id").(string)
+		if !ok || supabaseUserID == "" {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("não foi possível identificar o usuário na requisição"))
+			return
+		}
 
-		txtid := r.Context().Value("userinfo").(Values).Get("Id")
-		userid, _ := strconv.Atoi(txtid)
+		vars := mux.Vars(r)
+		instanceID, err := strconv.Atoi(vars["id"])
+		if err != nil {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("ID da instância inválido"))
+			return
+		}
 
-		if clientPointer[userid] == nil {
+		repo := repository.NewPostgresRepository(s.db)
+		instance, err := repo.GetInstance(instanceID, supabaseUserID)
+		if err != nil {
+			s.Respond(w, r, http.StatusNotFound, err)
+			return
+		}
+
+		// 2. Lógica de verificação de status
+		if clientPointer[instance.ID] == nil {
 			s.Respond(w, r, http.StatusInternalServerError, errors.New("No session"))
 			return
 		}
 
-		isConnected := clientPointer[userid].IsConnected()
-		isLoggedIn := clientPointer[userid].IsLoggedIn()
+		isConnected := clientPointer[instance.ID].IsConnected()
+		isLoggedIn := clientPointer[instance.ID].IsLoggedIn()
 
 		response := map[string]interface{}{"Connected": isConnected, "LoggedIn": isLoggedIn}
 		responseJson, err := json.Marshal(response)
@@ -675,7 +711,6 @@ func (s *server) GetStatus() http.HandlerFunc {
 		} else {
 			s.Respond(w, r, http.StatusOK, string(responseJson))
 		}
-		return
 	}
 }
 
@@ -4089,195 +4124,117 @@ func (s *server) ListNewsletter() http.HandlerFunc {
 	}
 }
 
-// Admin List users
+// ListUsers retorna a lista de instâncias de WhatsApp associadas ao usuário autenticado.
+// A função foi refatorada para suportar multi-tenancy.
 func (s *server) ListUsers() http.HandlerFunc {
-	type usersStruct struct {
-		Id         int            `db:"id"`
-		Name       string         `db:"name"`
-		Token      string         `db:"token"`
-		Webhook    string         `db:"webhook"`
-		Jid        string         `db:"jid"`
-		Qrcode     string         `db:"qrcode"`
-		Connected  sql.NullBool   `db:"connected"`
-		Expiration sql.NullInt64  `db:"expiration"`
-		Events     string         `db:"events"`
-		ProxyURL   sql.NullString `db:"proxy_url"`
-	}
-
-	type instanceResponse struct {
-		Id         int    `json:"id"`
-		Name       string `json:"name"`
-		Token      string `json:"token"`
-		Connected  bool   `json:"connected"`
-		QRCode     string `json:"qrcode,omitempty"`
-		Webhook    string `json:"webhook"`
-		Jid        string `json:"jid"`
-		Events     string `json:"events"`
-		Expiration int64  `json:"expiration"`
-		ProxyURL   string `json:"proxy_url,omitempty"`
-	}
-
 	return func(w http.ResponseWriter, r *http.Request) {
-		log.Info().Msg("Iniciando busca de usuários")
-
-		// Verifica se o banco de dados está disponível
-		if s.db == nil {
-			log.Error().Msg("Banco de dados não inicializado")
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error": "Banco de dados não disponível",
-			})
+		// 1. Extrair o supabase_user_id do contexto da requisição.
+		// Este valor foi injetado pelo nosso jwtMiddleware.
+		supabaseUserID, ok := r.Context().Value("supabase_user_id").(string)
+		if !ok || supabaseUserID == "" {
+			// Se não encontrarmos o ID, algo está muito errado (o middleware deveria ter bloqueado).
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("não foi possível identificar o usuário na requisição"))
 			return
 		}
 
-		var users []usersStruct
-		err := s.db.Select(&users, "SELECT id, name, token, webhook, jid, qrcode, connected, expiration, events, proxy_url FROM users ORDER BY id")
+		// 2. Chamar a função do repositório para buscar as instâncias do usuário.
+		// Note que não estamos mais usando s.db.Select diretamente no handler.
+		// A lógica de banco de dados está agora encapsulada no repositório.
+		repo := repository.NewPostgresRepository(s.db)
+		instances, err := repo.GetInstancesBySupabaseID(supabaseUserID)
 		if err != nil {
-			log.Error().Err(err).Msg("Erro ao buscar usuários no banco de dados")
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error": "Erro ao buscar usuários no banco de dados",
-			})
+			s.Respond(w, r, http.StatusInternalServerError, fmt.Errorf("erro ao buscar instâncias: %w", err))
 			return
 		}
 
-		log.Info().Int("quantidade_usuarios", len(users)).Msg("Usuários encontrados")
-
-		instances := make([]instanceResponse, 0)
-		for _, user := range users {
-			log.Debug().
-				Int("id", user.Id).
-				Str("name", user.Name).
-				Bool("connected", user.Connected.Bool).
-				Msg("Processando usuário")
-
-			instance := instanceResponse{
-				Id:         user.Id,
-				Name:       user.Name,
-				Token:      user.Token,
-				Connected:  user.Connected.Bool,
-				Webhook:    user.Webhook,
-				Jid:        user.Jid,
-				Events:     user.Events,
-				Expiration: user.Expiration.Int64,
-				ProxyURL:   user.ProxyURL.String,
-			}
-			if !user.Connected.Bool {
-				instance.QRCode = user.Qrcode
-			}
-			instances = append(instances, instance)
-		}
-
-		log.Info().Msg("Enviando resposta")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		if err := json.NewEncoder(w).Encode(map[string]interface{}{
-			"instances": instances,
-		}); err != nil {
-			log.Error().Err(err).Msg("Erro ao codificar resposta JSON")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error": "Erro ao codificar resposta",
-			})
-		}
+		// 3. Retornar a lista de instâncias em formato JSON.
+		s.Respond(w, r, http.StatusOK, instances)
 	}
 }
 
-func (s *server) AddUser() http.HandlerFunc {
+// AddInstance cria uma nova instância de WhatsApp para o usuário autenticado.
+func (s *server) AddInstance() http.HandlerFunc {
+	// A struct define o que esperamos receber no corpo da requisição JSON.
+	// Apenas o nome da instância é necessário.
+	type addInstanceRequest struct {
+		Name string `json:"name"`
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
-
-		// Parse the request body
-		var user struct {
-			Name       string `json:"name"`
-			Token      string `json:"token"`
-			Webhook    string `json:"webhook"`
-			Expiration int    `json:"expiration"`
-			Events     string `json:"events"`
-			ProxyURL   string `json:"proxy_url"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
-			s.Respond(w, r, http.StatusBadRequest, errors.New("Incomplete data in Payload. Required name, token, webhook, expiration, events"))
+		// 1. Extrair o supabase_user_id do contexto.
+		supabaseUserID, ok := r.Context().Value("supabase_user_id").(string)
+		if !ok || supabaseUserID == "" {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("não foi possível identificar o usuário na requisição"))
 			return
 		}
 
-		// Check if a user with the same token already exists
-		var count int
-		err := s.db.Get(&count, "SELECT COUNT(*) FROM users WHERE token = $1", user.Token)
+		// 2. Decodificar o corpo da requisição para obter o nome da nova instância.
+		var req addInstanceRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("corpo da requisição inválido"))
+			return
+		}
+		if req.Name == "" {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("o campo 'name' é obrigatório"))
+			return
+		}
+
+		// 3. Chamar a função do repositório para criar a instância no banco de dados.
+		repo := repository.NewPostgresRepository(s.db)
+		newInstance, err := repo.AddInstance(req.Name, supabaseUserID)
 		if err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("Problem accessing DB"))
-			return
-		}
-		if count > 0 {
-			s.Respond(w, r, http.StatusConflict, errors.New("User with the same token already exists"))
+			s.Respond(w, r, http.StatusInternalServerError, fmt.Errorf("erro ao criar instância: %w", err))
 			return
 		}
 
-		// Validate the events input
-		eventList := strings.Split(user.Events, ",")
-		for _, event := range eventList {
-			event = strings.TrimSpace(event)
-			if !isValidEventType(event) {
-				s.Respond(w, r, http.StatusBadRequest, errors.New("Invalid event: "+event))
-				return
-			}
-		}
-
-		// Insert the user into the database
-		var id int
-		err = s.db.QueryRowx(
-			"INSERT INTO users (name, token, webhook, expiration, events, jid, qrcode, proxy_url) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
-			user.Name, user.Token, user.Webhook, user.Expiration, user.Events, "", "", user.ProxyURL,
-		).Scan(&id)
-		if err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("Problem accessing DB"))
-			log.Error().Str("error", fmt.Sprintf("%v", err)).Msg("Admin DB Error")
-			return
-		}
-
-		// Return the inserted user ID
-		response := map[string]interface{}{
-			"id": id,
-		}
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("Problem encoding JSON"))
-			return
-		}
+		// 4. Retornar a instância recém-criada como resposta.
+		s.Respond(w, r, http.StatusCreated, newInstance)
 	}
 }
 
-func (s *server) DeleteUser() http.HandlerFunc {
+// DeleteInstance remove uma instância de WhatsApp pertencente ao usuário autenticado.
+func (s *server) DeleteInstance() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 1. Extrair o supabase_user_id do contexto.
+		supabaseUserID, ok := r.Context().Value("supabase_user_id").(string)
+		if !ok || supabaseUserID == "" {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("não foi possível identificar o usuário na requisição"))
+			return
+		}
 
-		// Get the user ID from the request URL
+		// 2. Extrair o ID da instância do URL da requisição.
 		vars := mux.Vars(r)
-		userID := vars["id"]
-
-		// Delete the user from the database
-		result, err := s.db.Exec("DELETE FROM users WHERE id=$1", userID)
+		instanceIDStr, ok := vars["id"]
+		if !ok {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("ID da instância não fornecido na URL"))
+			return
+		}
+		instanceID, err := strconv.Atoi(instanceIDStr)
 		if err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("Problem accessing DB"))
+			s.Respond(w, r, http.StatusBadRequest, errors.New("ID da instância inválido"))
 			return
 		}
 
-		// Check if the user was deleted
-		rowsAffected, err := result.RowsAffected()
+		// 3. Chamar a função do repositório para deletar a instância.
+		repo := repository.NewPostgresRepository(s.db)
+		err = repo.DeleteInstance(instanceID, supabaseUserID)
 		if err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("Problem checking rows affected"))
-			return
-		}
-		if rowsAffected == 0 {
-			s.Respond(w, r, http.StatusNotFound, errors.New("User not found"))
+			// O repositório retorna um erro específico se a instância não for encontrada ou não pertencer ao usuário.
+			if err.Error() == "instância não encontrada ou não pertence ao usuário" {
+				s.Respond(w, r, http.StatusNotFound, err)
+			} else {
+				s.Respond(w, r, http.StatusInternalServerError, fmt.Errorf("erro ao deletar instância: %w", err))
+			}
 			return
 		}
 
-		// Return a success response
-		response := map[string]interface{}{"Details": "User deleted successfully"}
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("Problem encoding JSON"))
-			return
-		}
+		// Limpar o cache para remover informações da instância deletada.
+		userinfocache.Flush()
+
+		// 4. Retornar uma resposta de sucesso.
+		response := map[string]interface{}{"details": "Instância deletada com sucesso"}
+		jsonResponse, _ := json.Marshal(response)
+		s.Respond(w, r, http.StatusOK, string(jsonResponse))
 	}
 }
 
@@ -4467,77 +4424,47 @@ func (s *server) ValidateToken() http.HandlerFunc {
 	}
 }
 
-func (s *server) EditUser() http.HandlerFunc {
+// EditInstance atualiza os dados de uma instância pertencente ao usuário autenticado.
+func (s *server) EditInstance() http.HandlerFunc {
+	type editInstanceRequest struct {
+		Name    string `json:"name"`
+		Webhook string `json:"webhook"`
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Get the user ID from the request URL
+		// 1. Extrair IDs e verificar posse
+		supabaseUserID, ok := r.Context().Value("supabase_user_id").(string)
+		if !ok || supabaseUserID == "" {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("não foi possível identificar o usuário"))
+			return
+		}
 		vars := mux.Vars(r)
-		userID := vars["id"]
-
-		// Parse the request body
-		var user struct {
-			Name       string `json:"name"`
-			Token      string `json:"token"`
-			Webhook    string `json:"webhook"`
-			Expiration int    `json:"expiration"`
-			Events     string `json:"events"`
-			ProxyURL   string `json:"proxy_url"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
-			s.Respond(w, r, http.StatusBadRequest, errors.New("Incomplete data in Payload. Required name, token, webhook, expiration, events"))
-			return
-		}
-
-		// Check if a user with the same token already exists (excluding current user)
-		var count int
-		err := s.db.Get(&count, "SELECT COUNT(*) FROM users WHERE token = $1 AND id != $2", user.Token, userID)
+		instanceID, err := strconv.Atoi(vars["id"])
 		if err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("Problem accessing DB"))
-			return
-		}
-		if count > 0 {
-			s.Respond(w, r, http.StatusConflict, errors.New("User with the same token already exists"))
+			s.Respond(w, r, http.StatusBadRequest, errors.New("ID da instância inválido"))
 			return
 		}
 
-		// Validate the events input
-		eventList := strings.Split(user.Events, ",")
-		for _, event := range eventList {
-			event = strings.TrimSpace(event)
-			if !isValidEventType(event) {
-				s.Respond(w, r, http.StatusBadRequest, errors.New("Invalid event: "+event))
-				return
-			}
+		// 2. Decodificar corpo da requisição
+		var req editInstanceRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("corpo da requisição inválido"))
+			return
+		}
+		if req.Name == "" {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("o campo 'name' é obrigatório"))
+			return
 		}
 
-		// Update the user in the database
-		result, err := s.db.Exec(
-			"UPDATE users SET name = $1, token = $2, webhook = $3, expiration = $4, events = $5, proxy_url = $6 WHERE id = $7",
-			user.Name, user.Token, user.Webhook, user.Expiration, user.Events, user.ProxyURL, userID,
-		)
+		// 3. Chamar repositório para atualizar
+		repo := repository.NewPostgresRepository(s.db)
+		updatedInstance, err := repo.UpdateInstance(instanceID, supabaseUserID, req.Name, req.Webhook)
 		if err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("Problem accessing DB"))
-			log.Error().Str("error", fmt.Sprintf("%v", err)).Msg("Admin DB Error")
+			s.Respond(w, r, http.StatusNotFound, err) // Repo retorna erro de "não encontrado"
 			return
 		}
 
-		// Check if the user was updated
-		rowsAffected, err := result.RowsAffected()
-		if err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("Problem checking rows affected"))
-			return
-		}
-		if rowsAffected == 0 {
-			s.Respond(w, r, http.StatusNotFound, errors.New("User not found"))
-			return
-		}
-
-		// Return a success response
-		response := map[string]interface{}{
-			"id": userID,
-		}
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("Problem encoding JSON"))
-			return
-		}
+		// 4. Retornar a instância atualizada
+		s.Respond(w, r, http.StatusOK, updatedInstance)
 	}
 }

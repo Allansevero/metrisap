@@ -124,25 +124,27 @@ const Instances: React.FC = () => {
     }));
   };
 
+  const { session } = useAuth(); // Usando o novo hook de autenticação
+
   const fetchInstances = async () => {
+    if (!session) return; // Não faz nada se não houver sessão
+
     try {
-      const token = localStorage.getItem('token');
-      const response = await axios.get(`${process.env.REACT_APP_API_URL}/admin/users`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+      // Usamos o access_token da sessão do Supabase para autenticar
+      const response = await axios.get(`${process.env.REACT_APP_API_URL}/instances`, {
+        headers: { 'Authorization': `Bearer ${session.access_token}` }
       });
 
-      // Para cada instância, verifica o status
+      // O backend agora deve retornar o status de conexão diretamente, 
+      // mas vamos manter a lógica de verificação de status por enquanto.
       const instancesWithStatus = await Promise.all(
-        response.data.instances.map(async (instance: any) => {
+        response.data.map(async (instance: any) => {
           try {
-            const statusResponse = await axios.get(`${process.env.REACT_APP_API_URL}/session/status`, {
+            const statusResponse = await axios.get(`${process.env.REACT_APP_API_URL}/instances/${instance.ID}/status`, {
               headers: {
-                'Authorization': `Bearer ${token}`,
-                'token': instance.token
+                'Authorization': `Bearer ${session.access_token}`,
               }
             });
-
-            console.log('Resposta do status:', statusResponse.data);
 
             return {
               ...instance,
@@ -174,14 +176,17 @@ const Instances: React.FC = () => {
   }, []);
 
   const handleConnect = async (instance: Instance) => {
+    if (!session) return;
     try {
-      const token = localStorage.getItem('token');
-      await axios.post(`${process.env.REACT_APP_API_URL}/session/connect`, {}, {
-        headers: { 
-          'token': instance.token,
-          'Authorization': `Bearer ${token}`
+      // A nova chamada de API usa o endpoint refatorado e o token JWT
+      await axios.post(`${process.env.REACT_APP_API_URL}/instances/${instance.id}/connect`, 
+        { subscribe: ["All"] }, // Corpo da requisição
+        {
+          headers: { 
+            'Authorization': `Bearer ${session.access_token}`
+          }
         }
-      });
+      );
       fetchInstances();
     } catch (error) {
       console.error('Erro ao conectar instância:', error);
@@ -189,34 +194,18 @@ const Instances: React.FC = () => {
   };
 
   const handleDisconnect = async (instance: Instance) => {
+    if (!session) return;
     try {
-      const token = localStorage.getItem('token');
-      
-      // Tenta desconectar
-      try {
-        await axios.post(`${process.env.REACT_APP_API_URL}/session/disconnect`, null, {
+      await axios.post(
+        `${process.env.REACT_APP_API_URL}/instances/${instance.id}/disconnect`,
+        null, // Sem corpo na requisição
+        {
           headers: {
-            'Authorization': `Bearer ${token}`,
-            'token': instance.token
+            'Authorization': `Bearer ${session.access_token}`
           }
-        });
-      } catch (error) {
-        // Se o erro for "Cannot disconnect because it is not logged in",
-        // significa que a instância já está desconectada
-        if (axios.isAxiosError(error) && 
-            error.response?.data?.error === "Cannot disconnect because it is not logged in") {
-          console.log('Instância já está desconectada');
-          // Atualiza o estado da instância para desconectada
-          setInstances(instances.map(i => 
-            i.id === instance.id ? { ...i, connected: false } : i
-          ));
-          return;
-        } else {
-          throw error;
         }
-      }
-
-      // Atualiza a lista de instâncias para refletir o estado atual
+      );
+      // Atualiza a lista para refletir o novo status
       fetchInstances();
     } catch (error) {
       console.error('Erro ao desconectar instância:', error);
@@ -227,42 +216,18 @@ const Instances: React.FC = () => {
   };
 
   const handleLogout = async (instance: Instance) => {
+    if (!session) return;
     try {
-      if (!instance.connected) {
-        console.log('Instância já está desconectada');
-        return;
-      }
-
-      const token = localStorage.getItem('token');
-      
-      // Tenta conectar a instância primeiro
-      try {
-        await axios.post(`${process.env.REACT_APP_API_URL}/session/connect`, {
-          Subscribe: ["All"],
-          Immediate: true
-        }, {
+      await axios.post(
+        `${process.env.REACT_APP_API_URL}/instances/${instance.id}/logout`,
+        null, // Sem corpo na requisição
+        {
           headers: {
-            'Authorization': `Bearer ${token}`,
-            'token': instance.token
+            'Authorization': `Bearer ${session.access_token}`
           }
-        });
-      } catch (error) {
-        // Ignora erros de conexão, pois a instância pode já estar conectada
-        console.log('Ignorando erro de conexão:', error);
-      }
-
-      // Aguarda um pouco para a conexão ser estabelecida
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      // Tenta fazer logout
-      await axios.post(`${process.env.REACT_APP_API_URL}/session/logout`, null, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'token': instance.token
         }
-      });
-
-      // Atualiza a lista de instâncias
+      );
+      // Atualiza a lista para refletir o novo status
       fetchInstances();
     } catch (error) {
       console.error('Erro ao fazer logout da instância:', error);
@@ -273,74 +238,48 @@ const Instances: React.FC = () => {
   };
 
   const handleGetQR = async (instance: Instance) => {
+    if (!session) return;
     try {
-      const token = localStorage.getItem('token');
-      
-      // Verifica o status da instância
-      const statusResponse = await axios.get(`${process.env.REACT_APP_API_URL}/session/status`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'token': instance.token
-        }
-      });
-
-      // Se não estiver conectado, tenta conectar
-      if (!statusResponse.data.data.Connected) {
-        await axios.post(`${process.env.REACT_APP_API_URL}/session/connect`, {
-          Subscribe: ["All"],
-          Immediate: true
-        }, {
+      const response = await axios.get(
+        `${process.env.REACT_APP_API_URL}/instances/${instance.id}/qr`,
+        {
           headers: {
-            'Authorization': `Bearer ${token}`,
-            'token': instance.token
+            'Authorization': `Bearer ${session.access_token}`
           }
-        });
-
-        // Aguarda um pouco para a conexão ser estabelecida
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-
-      // Tenta obter o QR code
-      const response = await axios.get(`${process.env.REACT_APP_API_URL}/session/qr`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'token': instance.token
         }
-      });
+      );
       
-      console.log('Resposta completa do QR code:', response);
-      console.log('Dados do QR code:', response.data);
-      
-      if (response.data && response.data.data && response.data.data.QRCode) {
+      // A resposta do backend agora é mais simples
+      if (response.data && response.data.data.QRCode) {
         const qrCodeBase64 = response.data.data.QRCode;
-        console.log('QR code base64:', qrCodeBase64);
         setSelectedInstance({ ...instance, qrcode: qrCodeBase64 });
         setOpenQrDialog(true);
       } else {
-        console.error('Estrutura da resposta inesperada:', response.data);
+        console.error('Estrutura da resposta de QR code inesperada:', response.data);
       }
     } catch (error) {
       console.error('Erro ao obter QR code:', error);
       if (axios.isAxiosError(error)) {
-        console.error('Detalhes do erro:', {
-          status: error.response?.status,
-          data: error.response?.data,
-          headers: error.response?.headers
-        });
+        console.error('Detalhes do erro:', error.response?.data);
       }
     }
   };
 
   const handleDelete = async () => {
-    if (!selectedInstance) return;
+    if (!selectedInstance || !session) return;
     try {
-      const token = localStorage.getItem('token');
-      await axios.delete(`${process.env.REACT_APP_API_URL}/admin/users/${selectedInstance.id}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      await handleDisconnect(selectedInstance);
-      await handleLogout(selectedInstance);
-      setInstances(instances.filter(instance => instance.id !== selectedInstance.id));
+      await axios.delete(
+        `${process.env.REACT_APP_API_URL}/instances/${selectedInstance.id}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${session.access_token}`
+          }
+        }
+      );
+      
+      // Após deletar, simplesmente buscamos a lista atualizada do servidor.
+      fetchInstances(); 
+      
       setOpenDeleteDialog(false);
       setSelectedInstance(null);
     } catch (error) {
@@ -349,18 +288,24 @@ const Instances: React.FC = () => {
   };
 
   const handleCreateInstance = async () => {
+    if (!session) return;
     try {
-      const token = localStorage.getItem('token');
-      await axios.post(`${process.env.REACT_APP_API_URL}/admin/users`, {
-        ...newInstance,
-        events: newInstance.events.join(',')
-      }, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      // O corpo da requisição agora só precisa do nome.
+      // O backend cuidará de gerar o token e associar ao usuário.
+      await axios.post(
+        `${process.env.REACT_APP_API_URL}/instances`, 
+        { name: newInstance.name }, 
+        {
+          headers: {
+            'Authorization': `Bearer ${session.access_token}`
+          }
+        }
+      );
       setOpenModal(false);
+      // Limpa o estado do formulário
       setNewInstance({ 
         name: '', 
-        token: uuidv4(),
+        token: '', // Não precisamos mais gerar no frontend
         webhook: '', 
         expiration: 0, 
         events: ['All'],
@@ -947,94 +892,18 @@ const Instances: React.FC = () => {
       >
         <DialogTitle>Nova Instância</DialogTitle>
         <DialogContent>
+          <DialogContentText sx={{mb: 2}}>
+            Digite um nome para sua nova instância do WhatsApp.
+          </DialogContentText>
           <TextField
             autoFocus
             margin="dense"
-            label="Nome"
+            label="Nome da Instância"
             fullWidth
+            variant="standard"
             value={newInstance.name}
             onChange={(e) => setNewInstance({ ...newInstance, name: e.target.value })}
-            sx={{
-              '& .MuiOutlinedInput-root': {
-                color: '#e9edef',
-                '& fieldset': {
-                  borderColor: '#374045'
-                },
-                '&:hover fieldset': {
-                  borderColor: '#00a884'
-                },
-                '&.Mui-focused fieldset': {
-                  borderColor: '#00a884'
-                }
-              },
-              '& .MuiInputLabel-root': {
-                color: '#8696a0'
-              }
-            }}
           />
-          <TextField
-            margin="dense"
-            label="Token"
-            fullWidth
-            value={newInstance.token}
-            onChange={(e) => setNewInstance({ ...newInstance, token: e.target.value })}
-          />
-          <TextField
-            margin="dense"
-            label="Webhook"
-            fullWidth
-            value={newInstance.webhook}
-            onChange={(e) => setNewInstance({ ...newInstance, webhook: e.target.value })}
-          />
-          <TextField
-            margin="dense"
-            label="Expiração (em segundos)"
-            type="number"
-            fullWidth
-            value={newInstance.expiration}
-            onChange={(e) => setNewInstance({ ...newInstance, expiration: parseInt(e.target.value) })}
-          />
-          <TextField
-            margin="dense"
-            label="Proxy URL (opcional)"
-            placeholder="Ex: http://proxy:port ou socks5://user:pass@proxy:port"
-            fullWidth
-            value={newInstance.proxy_url}
-            onChange={(e) => setNewInstance({ ...newInstance, proxy_url: e.target.value })}
-            sx={{
-              '& .MuiOutlinedInput-root': {
-                color: '#e9edef',
-                '& fieldset': {
-                  borderColor: '#374045'
-                },
-                '&:hover fieldset': {
-                  borderColor: '#00a884'
-                },
-                '&.Mui-focused fieldset': {
-                  borderColor: '#00a884'
-                }
-              },
-              '& .MuiInputLabel-root': {
-                color: '#8696a0'
-              }
-            }}
-          />
-          <FormControl fullWidth margin="dense">
-            <InputLabel>Eventos</InputLabel>
-            <Select
-              multiple
-              value={newInstance.events}
-              label="Eventos"
-              onChange={(e) => setNewInstance({ ...newInstance, events: handleEventsChange(e.target.value) })}
-              renderValue={(selected) => (selected as string[]).join(', ')}
-            >
-              {SUPPORTED_EVENT_TYPES.map((eventType) => (
-                <MenuItem key={eventType} value={eventType}>
-                  {EVENT_TYPE_LABELS[eventType] || eventType}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <Button 

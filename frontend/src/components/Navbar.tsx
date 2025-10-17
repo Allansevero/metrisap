@@ -1,7 +1,8 @@
 import React from 'react';
 import { AppBar, Toolbar, Typography, Button, Box, Container } from '@mui/material';
-import { Link as RouterLink, useNavigate, useLocation } from 'react-router-dom';
+import { Link as RouterLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../supabaseClient'; // Importar o cliente supabase
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import StorageIcon from '@mui/icons-material/Storage';
 import LogoutIcon from '@mui/icons-material/Logout';
@@ -9,16 +10,21 @@ import DescriptionIcon from '@mui/icons-material/Description';
 import WhatsAppIcon from '@mui/icons-material/WhatsApp';
 
 const Navbar: React.FC = () => {
-  const { isAuthenticated, logout } = useAuth();
-  const navigate = useNavigate();
+  // Usamos a sessão do nosso novo hook de autenticação
+  const { session } = useAuth();
   const location = useLocation();
 
-  const handleLogout = () => {
-    logout();
-    navigate('/login');
+  // A nova função de logout chama o método signOut do Supabase
+  const handleLogout = async () => {
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      console.error('Error logging out:', error);
+    }
+    // O AuthContext irá detectar a mudança de estado e o ProtectedRoute fará o redirecionamento.
   };
 
-  if (!isAuthenticated) {
+  // Se não houver sessão, não renderizamos a barra de navegação.
+  if (!session) {
     return null;
   }
 
