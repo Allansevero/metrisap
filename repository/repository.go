@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"log"
+	"time"
 
 	"github.com/google/uuid" // Import para geração de UUID
 	"github.com/jmoiron/sqlx"
@@ -68,7 +69,7 @@ func (r *PostgresRepository) AddInstance(name, supabaseUserID string) (Instance,
 	query := `
 		INSERT INTO users (name, token, supabase_user_id)
 		VALUES ($1, $2, $3)
-		RETURNING id, name, token, webhook, jid, qrcode, connected, expiration, events, supabase_user_id
+		RETURNING id, name, token, webhook, jid, qrcode, connected, expiration, events, supabase_user_id, proxy_url
 	`
 	err := r.db.Get(&newInstance, query, name, newInstanceToken, supabaseUserID)
 	if err != nil {
@@ -87,7 +88,7 @@ func (r *PostgresRepository) UpdateInstance(instanceID int, supabaseUserID strin
 		UPDATE users
 		SET name = $1, webhook = $2
 		WHERE id = $3 AND supabase_user_id = $4
-		RETURNING id, name, token, webhook, jid, qrcode, connected, expiration, events, supabase_user_id
+		RETURNING id, name, token, webhook, jid, qrcode, connected, expiration, events, supabase_user_id, proxy_url
 	`
 	err := r.db.Get(&updatedInstance, query, newName, newWebhook, instanceID, supabaseUserID)
 	if err != nil {
@@ -131,15 +132,59 @@ func (r *PostgresRepository) ClearInstanceEvents(instanceID int, supabaseUserID 
 }
 
 // Instance representa a estrutura de dados de uma instância do WhatsApp (uma linha na tabela 'users').
+
 type Instance struct {
-	ID             int    `db:"id"`
-	Name           string `db:"name"`
-	Token          string `db:"token"`
-	Webhook        string `db:"webhook"`
-	Jid            string `db:"jid"`
-	Qrcode         string `db:"qrcode"`
-	Connected      int    `db:"connected"`
-	Expiration     int    `db:"expiration"`
-	Events         string `db:"events"`
-	SupabaseUserID string `db:"supabase_user_id"`
+
+	ID             int            `db:"id"`
+
+	Name           string         `db:"name"`
+
+	Token          string         `db:"token"`
+
+	Webhook        sql.NullString `db:"webhook"`
+
+	Jid            sql.NullString `db:"jid"`
+
+	Qrcode         sql.NullString `db:"qrcode"`
+
+	Connected      sql.NullInt64  `db:"connected"`
+
+	Expiration     sql.NullInt64  `db:"expiration"`
+
+	Events         sql.NullString `db:"events"`
+
+	SupabaseUserID string         `db:"supabase_user_id"`
+
+	ProxyURL       sql.NullString `db:"proxy_url"`
+
+}
+
+
+
+// AddMessage insere uma nova mensagem no banco de dados.
+
+func (r *PostgresRepository) AddMessage(instanceID int, conversationID, messageID, senderJID, textContent, messageType string, audioContent []byte, timestamp time.Time) error {
+
+	query := `
+
+		INSERT INTO messages (instance_id, conversation_id, message_id, sender_jid, timestamp, text_content, audio_content, message_type)
+
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+
+		ON CONFLICT (instance_id, message_id) DO NOTHING;
+
+	`
+
+	_, err := r.db.Exec(query, instanceID, conversationID, messageID, senderJID, timestamp, textContent, audioContent, messageType)
+
+	if err != nil {
+
+		log.Printf("Erro ao inserir mensagem no banco de dados para a instância %d: %v", instanceID, err)
+
+		return err
+
+	}
+
+	return nil
+
 }
