@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { useAuth } from '../contexts/AuthContext';
 import { v4 as uuidv4 } from 'uuid';
 import { SUPPORTED_EVENT_TYPES, EVENT_TYPE_LABELS } from '../constants/eventTypes';
 import {
@@ -126,7 +127,7 @@ const Instances: React.FC = () => {
 
   const { session } = useAuth(); // Usando o novo hook de autenticação
 
-  const fetchInstances = async () => {
+  const fetchInstances = useCallback(async () => {
     if (!session) return; // Não faz nada se não houver sessão
 
     try {
@@ -138,7 +139,7 @@ const Instances: React.FC = () => {
       // O backend agora deve retornar o status de conexão diretamente, 
       // mas vamos manter a lógica de verificação de status por enquanto.
       const instancesWithStatus = await Promise.all(
-        response.data.map(async (instance: any) => {
+        response.data.data.map(async (instance: any) => {
           try {
             const statusResponse = await axios.get(`${process.env.REACT_APP_API_URL}/instances/${instance.ID}/status`, {
               headers: {
@@ -148,6 +149,7 @@ const Instances: React.FC = () => {
 
             return {
               ...instance,
+              id: instance.ID,
               connected: statusResponse.data.data.Connected,
               loggedIn: statusResponse.data.data.LoggedIn,
               events: Array.isArray(instance.events) ? instance.events : [instance.events]
@@ -155,6 +157,7 @@ const Instances: React.FC = () => {
           } catch (error) {
             return {
               ...instance,
+              id: instance.ID,
               connected: false,
               loggedIn: false,
               events: Array.isArray(instance.events) ? instance.events : [instance.events]
@@ -169,11 +172,11 @@ const Instances: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [session]);
 
   useEffect(() => {
     fetchInstances();
-  }, []);
+  }, [fetchInstances]);
 
   const handleConnect = async (instance: Instance) => {
     if (!session) return;
@@ -187,6 +190,8 @@ const Instances: React.FC = () => {
           }
         }
       );
+      // After connecting, immediately try to get the QR code.
+      await handleGetQR(instance);
       fetchInstances();
     } catch (error) {
       console.error('Erro ao conectar instância:', error);
@@ -249,11 +254,36 @@ const Instances: React.FC = () => {
         }
       );
       
-      // A resposta do backend agora é mais simples
       if (response.data && response.data.data.QRCode) {
         const qrCodeBase64 = response.data.data.QRCode;
         setSelectedInstance({ ...instance, qrcode: qrCodeBase64 });
         setOpenQrDialog(true);
+
+        // Start polling for status update
+        const interval = setInterval(async () => {
+          try {
+            const statusResponse = await axios.get(`${process.env.REACT_APP_API_URL}/instances/${instance.id}/status`, {
+              headers: {
+                'Authorization': `Bearer ${session.access_token}`,
+              }
+            });
+
+            if (statusResponse.data.data.LoggedIn) {
+              clearInterval(interval);
+              setOpenQrDialog(false);
+              fetchInstances();
+            }
+          } catch (error) {
+            console.error('Erro ao buscar status:', error);
+            clearInterval(interval);
+          }
+        }, 3000); // Poll every 3 seconds
+
+        // Stop polling after 2 minutes
+        setTimeout(() => {
+          clearInterval(interval);
+        }, 120000);
+
       } else {
         console.error('Estrutura da resposta de QR code inesperada:', response.data);
       }
