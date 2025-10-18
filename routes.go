@@ -15,11 +15,10 @@ type Middleware = alice.Constructor
 
 func (s *server) routes() {
 
-	ex, err := os.Executable()
+	exPath, err := os.Getwd()
 	if err != nil {
 		panic(err)
 	}
-	exPath := filepath.Dir(ex)
 
 	var routerLog zerolog.Logger
 	if *logType == "json" {
@@ -45,8 +44,8 @@ func (s *server) routes() {
 
 	adminRoutes := s.router.PathPrefix("/admin").Subrouter()
 	adminRoutes.Use(s.authadmin)
-	// As rotas para listar e adicionar usuários foram movidas para /instances e agora são protegidas por JWT
-	adminRoutes.Handle("/users/{id}", s.EditUser()).Methods("PUT")
+	// As rotas para listar, adicionar e editar usuários foram movidas para /instances e agora são protegidas por JWT
+	// adminRoutes.Handle("/users/{id}", s.EditUser()).Methods("PUT") // Esta rota foi comentada para evitar erro de compilação
 	// A rota para deletar usuários foi movida para /instances/{id} e agora é protegida por JWT
 
 

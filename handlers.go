@@ -244,9 +244,9 @@ func (s *server) Connect() http.HandlerFunc {
 		// O cache antigo `userinfocache` deve ser descontinuado ou repensado. Por agora, vamos ignorá-lo.
 
 		// 6. Iniciar o cliente whatsmeow
-		log.Info().Str("jid", instance.Jid).Msg("Attempt to connect")
+		log.Info().Str("jid", instance.Jid.String).Msg("Attempt to connect")
 		killchannel[instance.ID] = make(chan bool)
-		go s.startClient(instance.ID, instance.Jid, instance.Token, subscribedEvents)
+		go s.startClient(instance.ID, instance.Jid.String, instance.Token, subscribedEvents)
 
 		if !req.Immediate {
 			log.Warn().Msg("Waiting 10 seconds")
@@ -259,7 +259,7 @@ func (s *server) Connect() http.HandlerFunc {
 		}
 
 		// 7. Responder com sucesso
-		response := map[string]interface{}{"webhook": instance.Webhook, "jid": instance.Jid, "events": eventstring, "details": "Connected!"}
+		response := map[string]interface{}{"webhook": instance.Webhook.String, "jid": instance.Jid.String, "events": eventstring, "details": "Connected!"}
 		responseJson, err := json.Marshal(response)
 		if err != nil {
 			s.Respond(w, r, http.StatusInternalServerError, err)
@@ -295,10 +295,9 @@ func (s *server) Disconnect() http.HandlerFunc {
 
 		// 2. Lógica de desconexão
 		if clientPointer[instance.ID] != nil && clientPointer[instance.ID].IsConnected() && clientPointer[instance.ID].IsLoggedIn() {
-			log.Info().Str("jid", instance.Jid).Msg("Disconnection successful")
+			log.Info().Str("jid", instance.Jid.String).Msg("Disconnection successful")
 
-			// Envia o webhook de desconexão antes de matar o cliente
-			if instance.Webhook != "" {
+if instance.Webhook.Valid && instance.Webhook.String != "" {
 				postmap := make(map[string]interface{})
 				postmap["type"] = "Disconnected"
 				postmap["event"] = map[string]interface{}{}
@@ -309,8 +308,8 @@ func (s *server) Disconnect() http.HandlerFunc {
 						"jsonData": string(jsonData),
 						"token":    instance.Token,
 					}
-					log.Info().Str("url", instance.Webhook).Str("eventType", "Disconnected").Msg("Sending Disconnected webhook")
-					go callHook(instance.Webhook, data, instance.ID)
+					log.Info().Str("url", instance.Webhook.String).Str("eventType", "Disconnected").Msg("Sending Disconnected webhook")
+					go callHook(instance.Webhook.String, data, instance.ID)
 				}
 			}
 
@@ -332,7 +331,7 @@ func (s *server) Disconnect() http.HandlerFunc {
 				s.Respond(w, r, http.StatusOK, string(responseJson))
 			}
 		} else {
-			log.Warn().Str("jid", instance.Jid).Msg("Ignoring disconnect as it was not connected/logged in")
+			log.Warn().Str("jid", instance.Jid.String).Msg("Ignoring disconnect as it was not connected/logged in")
 			s.Respond(w, r, http.StatusInternalServerError, errors.New("Cannot disconnect because it is not logged in or connected"))
 		}
 	}
@@ -575,15 +574,15 @@ func (s *server) Logout() http.HandlerFunc {
 		if clientPointer[instance.ID] != nil && clientPointer[instance.ID].IsConnected() && clientPointer[instance.ID].IsLoggedIn() {
 			err := clientPointer[instance.ID].Logout(r.Context())
 			if err != nil {
-				log.Error().Str("jid", instance.Jid).Msg("Could not perform logout")
+				log.Error().Str("jid", instance.Jid.String).Msg("Could not perform logout")
 				s.Respond(w, r, http.StatusInternalServerError, errors.New("Could not perform logout"))
 				return
 			}
 
-			log.Info().Str("jid", instance.Jid).Msg("Logged out")
+			log.Info().Str("jid", instance.Jid.String).Msg("Logged out")
 
 			// Envia o webhook de logout
-			if instance.Webhook != "" {
+			if instance.Webhook.Valid && instance.Webhook.String != "" {
 				postmap := make(map[string]interface{})
 				postmap["type"] = "LoggedOut"
 				postmap["event"] = map[string]interface{}{}
@@ -594,14 +593,14 @@ func (s *server) Logout() http.HandlerFunc {
 						"jsonData": string(jsonData),
 						"token":    instance.Token,
 					}
-					log.Info().Str("url", instance.Webhook).Str("eventType", "LoggedOut").Msg("Sending LoggedOut webhook")
-					go callHook(instance.Webhook, data, instance.ID)
+					log.Info().Str("url", instance.Webhook.String).Str("eventType", "LoggedOut").Msg("Sending LoggedOut webhook")
+					go callHook(instance.Webhook.String, data, instance.ID)
 				}
 			}
 
 			killchannel[instance.ID] <- true
 		} else {
-			log.Warn().Str("jid", instance.Jid).Msg("Ignoring logout as it was not connected/logged in")
+			log.Warn().Str("jid", instance.Jid.String).Msg("Ignoring logout as it was not connected/logged in")
 			s.Respond(w, r, http.StatusInternalServerError, errors.New("Could not perform logout as it was not connected/logged in"))
 			return
 		}
@@ -795,48 +794,61 @@ func (s *server) SendDocument() http.HandlerFunc {
 			return
 		}
 
-		msg := &waProto.Message{DocumentMessage: &waProto.DocumentMessage{
-			URL:           proto.String(uploaded.URL),
-			FileName:      &t.FileName,
-			DirectPath:    proto.String(uploaded.DirectPath),
-			MediaKey:      uploaded.MediaKey,
-			Mimetype:      proto.String(http.DetectContentType(filedata)),
-			FileEncSHA256: uploaded.FileEncSHA256,
-			FileSHA256:    uploaded.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(filedata))),
-			Caption:       proto.String(t.Caption),
-		}}
-
-		if t.ContextInfo.StanzaID != nil {
-			msg.ExtendedTextMessage.ContextInfo = &waProto.ContextInfo{
-				StanzaID:      proto.String(*t.ContextInfo.StanzaID),
-				Participant:   proto.String(*t.ContextInfo.Participant),
-				QuotedMessage: &waProto.Message{Conversation: proto.String("")},
-			}
-		}
-		if t.ContextInfo.MentionedJID != nil {
-			if msg.ExtendedTextMessage.ContextInfo == nil {
-				msg.ExtendedTextMessage.ContextInfo = &waProto.ContextInfo{}
-			}
-			msg.ExtendedTextMessage.ContextInfo.MentionedJID = t.ContextInfo.MentionedJID
-		}
-
-		resp, err = clientPointer[userid].SendMessage(r.Context(), recipient, msg, whatsmeow.SendRequestExtra{ID: msgid})
-		if err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New(fmt.Sprintf("Error sending message: %v", err)))
-			return
-		}
-
-		log.Info().Str("timestamp", fmt.Sprintf("%d", resp.Timestamp)).Str("id", msgid).Msg("Message sent")
-		response := map[string]interface{}{"Details": "Sent", "Timestamp": resp.Timestamp, "Id": msgid}
-		responseJson, err := json.Marshal(response)
-		if err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, err)
-		} else {
-			s.Respond(w, r, http.StatusOK, string(responseJson))
-		}
-		return
-	}
+		        msg := &waProto.Message{DocumentMessage: &waProto.DocumentMessage{
+		            URL:           proto.String(uploaded.URL),
+		            FileName:      &t.FileName,
+		            DirectPath:    proto.String(uploaded.DirectPath),
+		            MediaKey:      uploaded.MediaKey,
+		            Mimetype:      proto.String(http.DetectContentType(filedata)),
+		            FileEncSHA256: uploaded.FileEncSHA256,
+		            FileSHA256:    uploaded.FileSHA256,
+		            FileLength:    proto.Uint64(uint64(len(filedata))),
+		            Caption:       proto.String(t.Caption),
+		        }}
+		
+		        if t.ContextInfo.StanzaID != nil {
+		            msg.ExtendedTextMessage.ContextInfo = &waProto.ContextInfo{
+		                StanzaID:      proto.String(*t.ContextInfo.StanzaID),
+		                Participant:   proto.String(*t.ContextInfo.Participant),
+		                QuotedMessage: &waProto.Message{Conversation: proto.String("")},
+		            }
+		        }
+		        if t.ContextInfo.MentionedJID != nil {
+		            if msg.ExtendedTextMessage.ContextInfo == nil {
+		                msg.ExtendedTextMessage.ContextInfo = &waProto.ContextInfo{}
+		            }
+		            msg.ExtendedTextMessage.ContextInfo.MentionedJID = t.ContextInfo.MentionedJID
+		        }
+		
+		        resp, err = clientPointer[userid].SendMessage(r.Context(), recipient, msg, whatsmeow.SendRequestExtra{ID: msgid})
+		        if err != nil {
+		            s.Respond(w, r, http.StatusInternalServerError, errors.New(fmt.Sprintf("Error sending message: %v", err)))
+		            return
+		        }
+		
+		        log.Info().Str("timestamp", fmt.Sprintf("%d", resp.Timestamp)).Str("id", msgid).Msg("Message sent")
+		
+		        // Salvar mensagem no banco de dados
+		        repo := repository.NewPostgresRepository(s.db)
+		        conversationID := recipient.String()
+		        senderJID := clientPointer[userid].Store.ID.String()
+		        timestamp := time.Now()
+		        textContent := t.Caption
+		        messageType := "document"
+		
+		        err = repo.AddMessage(userid, conversationID, msgid, senderJID, textContent, messageType, filedata, timestamp)
+		        if err != nil {
+		            log.Error().Err(err).Msg("Failed to save message to database")
+		        }
+		
+		        response := map[string]interface{}{"Details": "Sent", "Timestamp": resp.Timestamp, "Id": msgid}
+		        responseJson, err := json.Marshal(response)
+		        if err != nil {
+		            s.Respond(w, r, http.StatusInternalServerError, err)
+		        } else {
+		            s.Respond(w, r, http.StatusOK, string(responseJson))
+		        }
+		        return	}
 }
 
 // Sends an audio message
@@ -919,50 +931,63 @@ func (s *server) SendAudio() http.HandlerFunc {
 		ptt := true
 		mime := "audio/ogg; codecs=opus"
 
-		msg := &waProto.Message{AudioMessage: &waProto.AudioMessage{
-			URL:        proto.String(uploaded.URL),
-			DirectPath: proto.String(uploaded.DirectPath),
-			MediaKey:   uploaded.MediaKey,
-			//Mimetype:      proto.String(http.DetectContentType(filedata)),
-			Mimetype:      &mime,
-			FileEncSHA256: uploaded.FileEncSHA256,
-			FileSHA256:    uploaded.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(filedata))),
-			PTT:           &ptt,
-			Seconds:       proto.Uint32(t.Seconds),
-			Waveform:      t.Waveform,
-		}}
-
-		if t.ContextInfo.StanzaID != nil {
-			msg.ExtendedTextMessage.ContextInfo = &waProto.ContextInfo{
-				StanzaID:      proto.String(*t.ContextInfo.StanzaID),
-				Participant:   proto.String(*t.ContextInfo.Participant),
-				QuotedMessage: &waProto.Message{Conversation: proto.String("")},
-			}
-		}
-		if t.ContextInfo.MentionedJID != nil {
-			if msg.ExtendedTextMessage.ContextInfo == nil {
-				msg.ExtendedTextMessage.ContextInfo = &waProto.ContextInfo{}
-			}
-			msg.ExtendedTextMessage.ContextInfo.MentionedJID = t.ContextInfo.MentionedJID
-		}
-
-		resp, err = clientPointer[userid].SendMessage(r.Context(), recipient, msg, whatsmeow.SendRequestExtra{ID: msgid})
-		if err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New(fmt.Sprintf("Error sending message: %v", err)))
-			return
-		}
-
-		log.Info().Str("timestamp", fmt.Sprintf("%d", resp.Timestamp)).Str("id", msgid).Msg("Message sent")
-		response := map[string]interface{}{"Details": "Sent", "Timestamp": resp.Timestamp, "Id": msgid}
-		responseJson, err := json.Marshal(response)
-		if err != nil {
-			s.Respond(w, r, http.StatusInternalServerError, err)
-		} else {
-			s.Respond(w, r, http.StatusOK, string(responseJson))
-		}
-		return
-	}
+		        msg := &waProto.Message{AudioMessage: &waProto.AudioMessage{
+		            URL:        proto.String(uploaded.URL),
+		            DirectPath: proto.String(uploaded.DirectPath),
+		            MediaKey:   uploaded.MediaKey,
+		            //Mimetype:      proto.String(http.DetectContentType(filedata)),
+		            Mimetype:      &mime,
+		            FileEncSHA256: uploaded.FileEncSHA256,
+		            FileSHA256:    uploaded.FileSHA256,
+		            FileLength:    proto.Uint64(uint64(len(filedata))),
+		            PTT:           &ptt,
+		            Seconds:       proto.Uint32(t.Seconds),
+		            Waveform:      t.Waveform,
+		        }}
+		
+		        if t.ContextInfo.StanzaID != nil {
+		            msg.ExtendedTextMessage.ContextInfo = &waProto.ContextInfo{
+		                StanzaID:      proto.String(*t.ContextInfo.StanzaID),
+		                Participant:   proto.String(*t.ContextInfo.Participant),
+		                QuotedMessage: &waProto.Message{Conversation: proto.String("")},
+		            }
+		        }
+		        if t.ContextInfo.MentionedJID != nil {
+		            if msg.ExtendedTextMessage.ContextInfo == nil {
+		                msg.ExtendedTextMessage.ContextInfo = &waProto.ContextInfo{}
+		            }
+		            msg.ExtendedTextMessage.ContextInfo.MentionedJID = t.ContextInfo.MentionedJID
+		        }
+		
+		        resp, err = clientPointer[userid].SendMessage(r.Context(), recipient, msg, whatsmeow.SendRequestExtra{ID: msgid})
+		        if err != nil {
+		            s.Respond(w, r, http.StatusInternalServerError, errors.New(fmt.Sprintf("Error sending message: %v", err)))
+		            return
+		        }
+		
+		        log.Info().Str("timestamp", fmt.Sprintf("%d", resp.Timestamp)).Str("id", msgid).Msg("Message sent")
+		
+		        // Salvar mensagem no banco de dados
+		        repo := repository.NewPostgresRepository(s.db)
+		        conversationID := recipient.String()
+		        senderJID := clientPointer[userid].Store.ID.String()
+		        timestamp := time.Now()
+		        textContent := t.Caption
+		        messageType := "audio"
+		
+		        err = repo.AddMessage(userid, conversationID, msgid, senderJID, textContent, messageType, filedata, timestamp)
+		        if err != nil {
+		            log.Error().Err(err).Msg("Failed to save message to database")
+		        }
+		
+		        response := map[string]interface{}{"Details": "Sent", "Timestamp": resp.Timestamp, "Id": msgid}
+		        responseJson, err := json.Marshal(response)
+		        if err != nil {
+		            s.Respond(w, r, http.StatusInternalServerError, err)
+		        } else {
+		            s.Respond(w, r, http.StatusOK, string(responseJson))
+		        }
+		        return	}
 }
 
 // Sends an Image message
@@ -1105,6 +1130,20 @@ func (s *server) SendImage() http.HandlerFunc {
 		}
 
 		log.Info().Str("timestamp", fmt.Sprintf("%d", resp.Timestamp)).Str("id", msgid).Msg("Message sent")
+
+		// Salvar mensagem no banco de dados
+		repo := repository.NewPostgresRepository(s.db)
+		conversationID := recipient.String()
+		senderJID := clientPointer[userid].Store.ID.String()
+		timestamp := time.Now()
+		textContent := t.Caption
+		messageType := "image"
+
+		err = repo.AddMessage(userid, conversationID, msgid, senderJID, textContent, messageType, filedata, timestamp)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to save message to database")
+		}
+
 		response := map[string]interface{}{"Details": "Sent", "Timestamp": resp.Timestamp, "Id": msgid}
 		responseJson, err := json.Marshal(response)
 		if err != nil {
@@ -1923,6 +1962,20 @@ func (s *server) SendSticker() http.HandlerFunc {
 		}
 
 		log.Info().Str("timestamp", fmt.Sprintf("%d", resp.Timestamp)).Str("id", msgid).Msg("Message sent")
+
+		// Salvar mensagem no banco de dados
+		repo := repository.NewPostgresRepository(s.db)
+		conversationID := recipient.String()
+		senderJID := clientPointer[userid].Store.ID.String()
+		timestamp := time.Now()
+		textContent := ""
+		messageType := "sticker"
+
+		err = repo.AddMessage(userid, conversationID, msgid, senderJID, textContent, messageType, filedata, timestamp)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to save message to database")
+		}
+
 		response := map[string]interface{}{"Details": "Sent", "Timestamp": resp.Timestamp, "Id": msgid}
 		responseJson, err := json.Marshal(response)
 		if err != nil {
@@ -2011,7 +2064,6 @@ func (s *server) SendVideo() http.HandlerFunc {
 		}
 
 		msg := &waProto.Message{VideoMessage: &waProto.VideoMessage{
-			Caption:       proto.String(t.Caption),
 			URL:           proto.String(uploaded.URL),
 			DirectPath:    proto.String(uploaded.DirectPath),
 			MediaKey:      uploaded.MediaKey,
@@ -2019,22 +2071,9 @@ func (s *server) SendVideo() http.HandlerFunc {
 			FileEncSHA256: uploaded.FileEncSHA256,
 			FileSHA256:    uploaded.FileSHA256,
 			FileLength:    proto.Uint64(uint64(len(filedata))),
+			Caption:       proto.String(t.Caption),
 			JPEGThumbnail: t.JPEGThumbnail,
 		}}
-
-		if t.ContextInfo.StanzaID != nil {
-			msg.ExtendedTextMessage.ContextInfo = &waProto.ContextInfo{
-				StanzaID:      proto.String(*t.ContextInfo.StanzaID),
-				Participant:   proto.String(*t.ContextInfo.Participant),
-				QuotedMessage: &waProto.Message{Conversation: proto.String("")},
-			}
-		}
-		if t.ContextInfo.MentionedJID != nil {
-			if msg.ExtendedTextMessage.ContextInfo == nil {
-				msg.ExtendedTextMessage.ContextInfo = &waProto.ContextInfo{}
-			}
-			msg.ExtendedTextMessage.ContextInfo.MentionedJID = t.ContextInfo.MentionedJID
-		}
 
 		resp, err = clientPointer[userid].SendMessage(r.Context(), recipient, msg, whatsmeow.SendRequestExtra{ID: msgid})
 		if err != nil {
@@ -2043,6 +2082,20 @@ func (s *server) SendVideo() http.HandlerFunc {
 		}
 
 		log.Info().Str("timestamp", fmt.Sprintf("%d", resp.Timestamp)).Str("id", msgid).Msg("Message sent")
+
+		// Salvar mensagem no banco de dados
+		repo := repository.NewPostgresRepository(s.db)
+		conversationID := recipient.String()
+		senderJID := clientPointer[userid].Store.ID.String()
+		timestamp := time.Now()
+		textContent := t.Caption
+		messageType := "video"
+
+		err = repo.AddMessage(userid, conversationID, msgid, senderJID, textContent, messageType, filedata, timestamp)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to save message to database")
+		}
+
 		response := map[string]interface{}{"Details": "Sent", "Timestamp": resp.Timestamp, "Id": msgid}
 		responseJson, err := json.Marshal(response)
 		if err != nil {
@@ -2574,6 +2627,21 @@ func (s *server) SendMessage() http.HandlerFunc {
 		}
 
 		log.Info().Str("timestamp", fmt.Sprintf("%d", resp.Timestamp)).Str("id", msgid).Msg("Message sent")
+
+		// Salvar mensagem no banco de dados
+		repo := repository.NewPostgresRepository(s.db)
+		conversationID := recipient.String()
+		senderJID := clientPointer[userid].Store.ID.String()
+		timestamp := time.Now()
+		textContent := t.Body
+		var audioContent []byte
+		messageType := "text"
+
+		err = repo.AddMessage(userid, conversationID, msgid, senderJID, textContent, messageType, audioContent, timestamp)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to save message to database")
+		}
+
 		response := map[string]interface{}{"Details": "Sent", "Timestamp": resp.Timestamp, "Id": msgid}
 		responseJson, err := json.Marshal(response)
 		if err != nil {
@@ -2581,7 +2649,6 @@ func (s *server) SendMessage() http.HandlerFunc {
 		} else {
 			s.Respond(w, r, http.StatusOK, string(responseJson))
 		}
-
 		return
 	}
 }
@@ -4148,7 +4215,12 @@ func (s *server) ListUsers() http.HandlerFunc {
 		}
 
 		// 3. Retornar a lista de instâncias em formato JSON.
-		s.Respond(w, r, http.StatusOK, instances)
+		responseJson, err := json.Marshal(instances)
+		if err != nil {
+			s.Respond(w, r, http.StatusInternalServerError, err)
+			return
+		}
+		s.Respond(w, r, http.StatusOK, string(responseJson))
 	}
 }
 
@@ -4188,7 +4260,12 @@ func (s *server) AddInstance() http.HandlerFunc {
 		}
 
 		// 4. Retornar a instância recém-criada como resposta.
-		s.Respond(w, r, http.StatusCreated, newInstance)
+		responseJson, err := json.Marshal(newInstance)
+		if err != nil {
+			s.Respond(w, r, http.StatusInternalServerError, err)
+			return
+		}
+		s.Respond(w, r, http.StatusCreated, string(responseJson))
 	}
 }
 
@@ -4248,8 +4325,8 @@ func (s *server) Respond(w http.ResponseWriter, r *http.Request, status int, dat
 		dataenvelope["error"] = err.Error()
 		dataenvelope["success"] = false
 	} else {
-		mydata := make(map[string]interface{})
-		err = json.Unmarshal([]byte(data.(string)), &mydata)
+		var mydata interface{}
+		err := json.Unmarshal([]byte(data.(string)), &mydata)
 		if err != nil {
 			log.Error().Str("error", fmt.Sprintf("%v", err)).Msg("Error unmarshalling JSON")
 		}
@@ -4467,4 +4544,10 @@ func (s *server) EditInstance() http.HandlerFunc {
 		// 4. Retornar a instância atualizada
 		s.Respond(w, r, http.StatusOK, updatedInstance)
 	}
+}
+
+// EditUser atualiza os dados de um usuário pertencente ao usuário autenticado.
+// Este método foi adicionado para manter compatibilidade com chamadas antigas.
+func (s *server) EditUser() http.HandlerFunc {
+	return s.EditInstance() // Encaminha para a funcionalidade de edição de instância, adaptando conforme necessário
 }

@@ -114,11 +114,10 @@ func init() {
 }
 
 func main() {
-	ex, err := os.Executable()
+	exPath, err := os.Getwd()
 	if err != nil {
 		panic(err)
 	}
-	exPath := filepath.Dir(ex)
 
 	dbUser := os.Getenv("DB_USER")
 	dbPassword := os.Getenv("DB_PASSWORD")

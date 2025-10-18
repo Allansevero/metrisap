@@ -19,8 +19,7 @@ import (
 	"time"
 
 	"github.com/go-resty/resty/v2"
-	"github.com/jmoiron/sqlx" // Importação do sqlx
-	"github.com/mdp/qrterminal/v3"
+	"github.com/jmoiron/sqlx"
 	"github.com/patrickmn/go-cache"
 	"github.com/rs/zerolog/log"
 	"github.com/skip2/go-qrcode"
@@ -31,6 +30,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"wuzapi/repository"
 )
 
 // var wlog waLog.Logger
@@ -169,11 +169,20 @@ func (s *server) startClient(userID int, textjid string, token string, subscript
 	//store.CompanionProps.PlatformType = waProto.CompanionProps_CHROME.Enum()
 	//store.CompanionProps.Os = proto.String("Mac OS")
 
-	osName := "Mac OS 10"
-	store.DeviceProps.PlatformType = waProto.DeviceProps_UNKNOWN.Enum()
-	store.DeviceProps.Os = &osName
+		osName := "Mac OS 10"
 
-	clientLog := waLog.Stdout("Client", *waDebug, *colorOutput)
+		store.DeviceProps.PlatformType = waProto.DeviceProps_UNKNOWN.Enum()
+
+		store.DeviceProps.Os = &osName
+
+	
+
+		// HistorySyncConfig is not available in newer versions of whatsmeow
+		// The sync behavior is now handled automatically
+
+	
+
+		clientLog := waLog.Stdout("Client", *waDebug, *colorOutput)
 	var client *whatsmeow.Client
 	if *waDebug != "" {
 		client = whatsmeow.NewClient(deviceStore, clientLog)
@@ -226,8 +235,8 @@ func (s *server) startClient(userID int, textjid string, token string, subscript
 				if evt.Event == "code" {
 					// Display QR code in terminal (useful for testing/developing)
 					if *logType != "json" {
-						qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-						fmt.Println("QR code:\n", evt.Code)
+						// qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+						// fmt.Println("QR code:\n", evt.Code)
 					}
 					// Store encoded/embeded base64 QR on database for retrieval with the /qr endpoint
 					image, _ := qrcode.Encode(evt.Code, qrcode.Medium, 256)
@@ -268,6 +277,8 @@ func (s *server) startClient(userID int, textjid string, token string, subscript
 		if err != nil {
 			panic(err)
 		}
+		// RequestFullSync is not available in newer versions of whatsmeow
+		// Sync behavior is now handled automatically
 	}
 
 	// Keep connected client live until disconnected/killed
@@ -396,6 +407,8 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			userinfocache.Set(token, v, cache.NoExpiration)
 			log.Info().Str("jid", jid.String()).Str("userid", txtid).Str("token", token).Msg("User information set")
 		}
+		// RequestFullSync is not available in newer versions of whatsmeow
+		// Sync is handled automatically
 	case *events.StreamReplaced:
 		postmap["type"] = "StreamReplaced"
 		dowebhook = 1
@@ -418,6 +431,39 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		}
 
 		log.Info().Str("id", evt.Info.ID).Str("source", evt.Info.SourceString()).Str("parts", strings.Join(metaParts, ", ")).Msg("Message Received")
+
+		// Salvar mensagem no banco de dados
+		repo := repository.NewPostgresRepository(mycli.db)
+		conversationID := evt.Info.Chat.String()
+		messageID := evt.Info.ID
+		senderJID := evt.Info.Sender.String()
+		timestamp := evt.Info.Timestamp
+		textContent := ""
+		var audioContent []byte
+		messageType := "text"
+
+		if evt.Message.GetConversation() != "" {
+			textContent = evt.Message.GetConversation()
+		} else if extended := evt.Message.GetExtendedTextMessage(); extended != nil {
+			textContent = extended.GetText()
+		}
+
+		// try to get Audio if any
+		audio := evt.Message.GetAudioMessage()
+		if audio != nil {
+			messageType = "audio"
+			data, err := mycli.WAClient.Download(context.Background(), audio)
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to download audio")
+			} else {
+				audioContent = data
+			}
+		}
+
+		err := repo.AddMessage(mycli.userID, conversationID, messageID, senderJID, textContent, messageType, audioContent, timestamp)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to save message to database")
+		}
 
 		// try to get Image if any
 		img := evt.Message.GetImageMessage()
@@ -455,53 +501,6 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			} else {
 				log.Error().Err(err).Msg("Failed to convert image to base64")
 			}
-			// log.Debug().Str("path",path).Msg("Image converted to base64")
-		}
-
-		// try to get Audio if any
-		audio := evt.Message.GetAudioMessage()
-		if audio != nil {
-			// check/creates user directory for files
-			userDirectory := filepath.Join(exPath, "files", "user_"+txtid)
-			_, err := os.Stat(userDirectory)
-			if os.IsNotExist(err) {
-				errDir := os.MkdirAll(userDirectory, 0751)
-				if errDir != nil {
-					log.Error().Err(errDir).Msg("Could not create user directory")
-					return
-				}
-			}
-
-			data, err := mycli.WAClient.Download(context.Background(), audio)
-			if err != nil {
-				log.Error().Err(err).Msg("Failed to download audio")
-				return
-			}
-			exts, _ := mime.ExtensionsByType(audio.GetMimetype())
-			var ext string
-			if len(exts) > 0 {
-				ext = exts[0]
-			} else {
-				ext = ".ogg"
-			}
-			path = filepath.Join(userDirectory, evt.Info.ID+ext)
-			err = os.WriteFile(path, data, 0600)
-			if err != nil {
-				log.Error().Err(err).Msg("Failed to save audio")
-				return
-			}
-			log.Info().Str("path", path).Msg("Audio saved")
-			// Converte o áudio para base64
-			base64String, mimeType, err := fileToBase64(path)
-			if err == nil {
-				postmap["base64"] = base64String
-				postmap["mimeType"] = mimeType
-				postmap["fileName"] = filepath.Base(path)
-			} else {
-				log.Error().Err(err).Msg("Failed to convert audio to base64")
-			}
-			// log.Debug().Str("path",path).Msg("Audio converted to base64")
-		}
 		// try to get Document if any
 		document := evt.Message.GetDocumentMessage()
 		if document != nil {
@@ -587,6 +586,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			}
 			// log.Debug().Str("path",path).Msg("Video converted to base64")
 		}
+	}
 
 	case *events.Receipt:
 		postmap["type"] = "ReadReceipt"
@@ -622,6 +622,50 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.HistorySync:
 		postmap["type"] = "HistorySync"
 		dowebhook = 1
+
+		// Salvar histórico no banco de dados
+		repo := repository.NewPostgresRepository(mycli.db)
+		for _, conv := range evt.Data.Conversations {
+			for _, msg := range conv.Messages {
+				var senderJID string
+				if msg.Message.Key != nil && msg.Message.Key.FromMe != nil && *msg.Message.Key.FromMe {
+					senderJID = mycli.WAClient.Store.ID.String()
+				} else if msg.Message.Key != nil && msg.Message.Key.RemoteJID != nil {
+					senderJID = *msg.Message.Key.RemoteJID
+				}
+
+				timestamp := time.Unix(int64(*msg.Message.MessageTimestamp), 0)
+
+				textContent := ""
+				var audioContent []byte
+				messageType := "text"
+
+				if msg.Message.Message != nil && msg.Message.Message.Conversation != nil {
+					textContent = *msg.Message.Message.Conversation
+				} else if msg.Message.Message != nil && msg.Message.Message.ExtendedTextMessage != nil {
+					textContent = *msg.Message.Message.ExtendedTextMessage.Text
+				}
+
+				var audio *waProto.AudioMessage
+				if msg.Message.Message != nil {
+					audio = msg.Message.Message.GetAudioMessage()
+				}
+				if audio != nil {
+					messageType = "audio"
+					data, err := mycli.WAClient.Download(context.Background(), audio)
+					if err != nil {
+						log.Error().Err(err).Msg("Failed to download audio from history")
+					} else {
+						audioContent = data
+					}
+				}
+
+				err := repo.AddMessage(mycli.userID, *conv.ID, *msg.Message.Key.ID, senderJID, textContent, messageType, audioContent, timestamp)
+				if err != nil {
+					log.Error().Err(err).Msg("Failed to save history message to database")
+				}
+			}
+		}
 
 		// check/creates user directory for files
 		userDirectory := filepath.Join(exPath, "files", "user_"+txtid)
