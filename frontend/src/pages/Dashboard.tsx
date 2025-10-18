@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useAuth } from '../contexts/AuthContext';
 import { Grid, Paper, Typography, Box, CircularProgress } from '@mui/material';
 import axios from 'axios';
 
@@ -15,33 +16,36 @@ const Dashboard: React.FC = () => {
   const [instances, setInstances] = useState<Instance[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const { session } = useAuth();
+
   useEffect(() => {
     const fetchInstances = async () => {
+      if (!session) return;
+
       try {
-        const token = localStorage.getItem('token');
-        const response = await axios.get(`${process.env.REACT_APP_API_URL}/admin/users`, {
-          headers: { 'Authorization': `Bearer ${token}` }
+        const response = await axios.get(`${process.env.REACT_APP_API_URL}/instances`, {
+          headers: { 'Authorization': `Bearer ${session.access_token}` }
         });
 
-        // Para cada instância, verifica o status
         const instancesWithStatus = await Promise.all(
-          response.data.instances.map(async (instance: Instance) => {
+          response.data.data.map(async (instance: any) => {
             try {
-              const statusResponse = await axios.get(`${process.env.REACT_APP_API_URL}/session/status`, {
+              const statusResponse = await axios.get(`${process.env.REACT_APP_API_URL}/instances/${instance.ID}/status`, {
                 headers: {
-                  'Authorization': `Bearer ${token}`,
-                  'token': instance.token
+                  'Authorization': `Bearer ${session.access_token}`,
                 }
               });
 
               return {
                 ...instance,
+                id: instance.ID,
                 connected: statusResponse.data.data.Connected,
                 loggedIn: statusResponse.data.data.LoggedIn
               };
             } catch (error) {
               return {
                 ...instance,
+                id: instance.ID,
                 connected: false,
                 loggedIn: false
               };
@@ -58,7 +62,7 @@ const Dashboard: React.FC = () => {
     };
 
     fetchInstances();
-  }, []);
+  }, [session]);
 
   if (loading) {
     return (
